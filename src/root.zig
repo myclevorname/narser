@@ -91,7 +91,10 @@ pub const NarArchive = struct {
                 prev = next;
                 try prevLevel(&to_parse, &recursion_depth);
             } else if (matchAndSlide(&to_parse, "symlink")) {
-                @panic("symlink handling");
+                try expectMatch(&to_parse, "target");
+                next.data = .{ .symlink = try unstr(&to_parse) };
+                prev = next;
+                try prevLevel(&to_parse, &recursion_depth);
             } else if (matchAndSlide(&to_parse, "directory")) {
                 next.data = .{ .directory = undefined };
                 parent = next;
@@ -239,4 +242,12 @@ test "a file, a directory, and some more files" {
     try expectEqualStrings("file3", file3.name.?);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
     try expectEqual(null, file3.next);
+}
+
+test "a symlink" {
+    var buf: [1000]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+
+    const data = try NarArchive.fromSlice(fba.allocator(), @constCast(@embedFile("tests/symlink.nar")));
+    try expectEqualStrings("README.out", data.root.data.symlink);
 }
