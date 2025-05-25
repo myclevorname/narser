@@ -1,0 +1,6 @@
+const std = @import("std");
+
+pub export fn _start() noreturn {
+    _ = std.os.linux.write(1, "Hello, World!\n", 14);
+    std.process.exit(0);
+}
