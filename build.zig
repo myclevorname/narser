@@ -10,13 +10,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const exe_mod = b.addModule("narse", .{
+    const exe_mod = b.addModule("narser_bin", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    exe_mod.addImport("narser", narser);
+    var tests_path = std.Build.Step.Options.create(b);
+    tests_path.addOptionPath("tests_path", b.path("src/tests"));
+    narser.addImport("tests", tests_path.createModule());
+
+    narser.addImport("narser", narser);
 
     const lib_mod = b.addModule("libnarser", .{
         .root_source_file = b.path("src/lib.zig"),

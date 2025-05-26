@@ -1,5 +1,7 @@
 const std = @import("std");
+const tests_path = @import("tests").tests_path;
 
+const assert = std.debug.assert;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
@@ -7,18 +9,21 @@ const mem = std.mem;
 const divCeil = std.math.divCeil;
 
 pub const NarArchive = struct {
-    root: *Object,
+    arena: std.heap.ArenaAllocator,
     pool: std.heap.MemoryPool(Object),
+    root: *Object,
 
     /// Takes ownership of a slice representing a Nix archive and deserializes it.
     /// Guaranteed to not modify the slice if an error occurs.
     /// TODO: Add validation for directory listing order
     pub fn fromSlice(allocator: std.mem.Allocator, slice: []u8) EncodeError!NarArchive {
         var self: NarArchive = .{
-            .pool = .init(allocator),
+            .arena = .init(allocator),
+            .pool = undefined,
             .root = undefined,
         };
-        errdefer self.pool.deinit();
+        self.pool = .init(self.arena.allocator());
+        errdefer self.deinit();
 
         var to_parse = slice;
         if (!matchAndSlide(&to_parse, "nix-archive-1")) return error.InvalidFormat;
@@ -110,8 +115,116 @@ pub const NarArchive = struct {
         return self;
     }
 
+    pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NarArchive {
+        var self: NarArchive = .{
+            .arena = .init(allocator),
+            .pool = undefined,
+            .root = undefined,
+        };
+        self.pool = .init(self.arena.allocator());
+        errdefer self.deinit();
+
+        const root_node = try self.pool.create();
+        root_node.* = .{
+            .parent = null,
+            .prev = null,
+            .next = null,
+            .name = null,
+            .data = .{ .directory = null },
+        };
+        self.root = root_node;
+
+        var walker = try root.walk(allocator);
+        defer walker.deinit();
+
+        var prev_node = root_node;
+
+        var prev_depth: usize = 0;
+        var next_depth: usize = undefined;
+
+        while (try walker.next()) |entry| {
+            var next_node = try self.pool.create();
+            next_node.* = .{
+                .parent = undefined,
+                .prev = null,
+                .next = null,
+                .name = try self.arena.allocator().dupe(u8, entry.basename),
+                .data = undefined,
+            };
+
+            next_depth = walker.stack.items.len;
+
+            next_node.data = switch (entry.kind) {
+                .directory => .{ .directory = null },
+                .sym_link => .{ .symlink = blk: {
+                    var buf: [std.fs.max_path_bytes]u8 = undefined;
+                    break :blk try entry.dir.readLink(entry.basename, &buf);
+                } },
+                .file => .{ .file = .{
+                    .contents = try entry.dir.readFileAlloc(
+                        self.arena.allocator(),
+                        entry.basename,
+                        std.math.maxInt(usize),
+                    ),
+                    .is_executable = (try entry.dir.statFile(entry.basename)).mode & 0x01 == 1,
+                } },
+                else => @panic("TODO: entry categorization"),
+            };
+
+            blk: {
+                if (next_depth > prev_depth) {
+                    prev_node.data.directory = next_node;
+                    next_node.parent = prev_node;
+                    if (next_node.data == .directory) next_depth -= 1;
+                } else {
+                    for (next_depth..prev_depth) |_| {
+                        prev_node = prev_node.parent.?;
+                }
+                    next_node.parent = prev_node.parent;
+
+                    search: while (prev_node.prev) |prev| {
+                        switch (mem.order(u8, prev.name.?, entry.basename)) {
+                            .lt => break :search,
+                            .eq => return error.DuplicateObjectName,
+                            .gt => prev_node = prev,
+                        }
+                    }
+                    search: while (true) {
+                        switch (mem.order(u8, entry.basename, prev_node.name.?)) {
+                            .lt => break :search,
+                            .eq => return error.DuplicateObjectName,
+                            .gt => prev_node = prev_node.next orelse {
+                                prev_node.next = next_node;
+                                next_node.prev = prev_node;
+                                break :blk;
+                            },
+                        }
+                    }
+
+                    // insert next_node to the left of prev_node, adjusting
+                    // prev_node.parent.?.data.directory if needed
+                    if (prev_node.prev == null) {
+                        prev_node.parent.?.data.directory = next_node;
+                        prev_node.prev = next_node;
+                        next_node.next = prev_node;
+                        break :blk;
+                    }
+
+                    next_node.prev = prev_node.prev;
+                    next_node.next = prev_node;
+                    prev_node.prev.?.next = next_node;
+                    prev_node.prev = next_node;
+                }
+            }
+
+            prev_node = next_node;
+            prev_depth = next_depth;
+        }
+        return self;
+    }
+
     pub fn deinit(self: *NarArchive) void {
-        self.pool.deinit();
+        self.arena.deinit();
         self.* = undefined;
     }
 };
@@ -199,18 +312,20 @@ fn str(comptime string: []const u8) []const u8 {
 }
 
 test "single file" {
-    var buf: [1000]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = std.testing.allocator;
 
-    const data = try NarArchive.fromSlice(fba.allocator(), @constCast(@embedFile("tests/README.nar")));
+    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/README.nar")));
+    defer data.deinit();
+
     try expectEqualStrings(@embedFile("tests/README.out"), data.root.data.file.contents);
 }
 
 test "directory containing a single file" {
-    var buf: [1000]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = std.testing.allocator;
 
-    const data = try NarArchive.fromSlice(fba.allocator(), @constCast(@embedFile("tests/hello.nar")));
+    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/hello.nar")));
+    defer data.deinit();
+
     const dir = data.root;
     const file = dir.data.directory.?;
     try expectEqualStrings(@embedFile("tests/hello.zig.out"), file.data.file.contents);
@@ -218,26 +333,26 @@ test "directory containing a single file" {
 }
 
 test "a file, a directory, and some more files" {
-    var buf: [1000]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = std.testing.allocator;
 
-    const data = try NarArchive.fromSlice(fba.allocator(), @constCast(@embedFile("tests/dir-and-files.nar")));
+    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/dir-and-files.nar")));
+    defer data.deinit();
 
-    const dir = data.root.*.data.directory.?.*;
+    const dir = data.root.data.directory.?;
     try expectEqualStrings("dir", dir.name.?);
 
-    const file1 = dir.next.?.*;
+    const file1 = dir.next.?;
     try expectEqual(file1.next, null);
     try expectEqualStrings("file1", file1.name.?);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
 
-    const file2 = dir.data.directory.?.*;
+    const file2 = dir.data.directory.?;
     try expectEqualStrings("file2", file2.name.?);
     try expectEqual(true, file2.data.file.is_executable);
     try expectEqualStrings("bye\n", file2.data.file.contents);
 
-    const file3 = file2.next.?.*;
+    const file3 = file2.next.?;
     try expectEqual(false, file3.data.file.is_executable);
     try expectEqualStrings("file3", file3.name.?);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
@@ -245,9 +360,54 @@ test "a file, a directory, and some more files" {
 }
 
 test "a symlink" {
-    var buf: [1000]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const allocator = std.testing.allocator;
 
-    const data = try NarArchive.fromSlice(fba.allocator(), @constCast(@embedFile("tests/symlink.nar")));
+    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/symlink.nar")));
+    defer data.deinit();
+
     try expectEqualStrings("README.out", data.root.data.symlink);
+}
+
+test "nar from dir-and-files" {
+    const allocator = std.testing.allocator;
+
+    // TODO: Use build options instead of this
+    var root = try std.fs.cwd().openDir(tests_path ++ "/dir-and-files", .{ .iterate = true });
+    defer root.close();
+
+    var data = try NarArchive.fromDirectory(allocator, root);
+    defer data.deinit();
+
+    const dir = data.root.data.directory.?;
+    //try expectEqualStrings("dir", dir.name.?);
+
+    const file1 = dir.next.?;
+    try expectEqual(file1.next, null);
+    try expectEqualStrings("file1", file1.name.?);
+    try expectEqual(false, file1.data.file.is_executable);
+    try expectEqualStrings("hi\n", file1.data.file.contents);
+
+    const file2 = dir.data.directory.?;
+    try expectEqualStrings("file2", file2.name.?);
+    try expectEqual(true, file2.data.file.is_executable);
+    try expectEqualStrings("bye\n", file2.data.file.contents);
+
+    const file3 = file2.next.?;
+    try expectEqual(false, file3.data.file.is_executable);
+    try expectEqualStrings("file3", file3.name.?);
+    try expectEqualStrings("nevermind\n", file3.data.file.contents);
+    try expectEqual(null, file3.next);
+}
+
+test "empty directory" {
+    const allocator = std.testing.allocator;
+
+    // TODO: Use build options instead of this
+    var root = try std.fs.cwd().openDir(tests_path ++ "/empty", .{ .iterate = true });
+    defer root.close();
+
+    var data = try NarArchive.fromDirectory(allocator, root);
+    defer data.deinit();
+
+    try expectEqual(null, data.root.data.directory);
 }
