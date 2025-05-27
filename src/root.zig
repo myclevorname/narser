@@ -164,8 +164,7 @@ pub const NarArchive = struct {
                 .data = undefined,
             };
 
-            next_depth = walker.stack.items.len;
-
+            next_depth = 1 + std.mem.count(u8, entry.path, "/");
             next_node.data = switch (entry.kind) {
                 .directory => .{ .directory = null },
                 .sym_link => .{ .symlink = blk: {
@@ -186,11 +185,11 @@ pub const NarArchive = struct {
                 if (next_depth > prev_depth) {
                     prev_node.data.directory = next_node;
                     next_node.parent = prev_node;
-                    if (next_node.data == .directory) next_depth -= 1;
                 } else {
                     for (next_depth..prev_depth) |_| {
                         prev_node = prev_node.parent.?;
                     }
+                    prev_depth = next_depth;
                     next_node.parent = prev_node.parent;
 
                     search: while (prev_node.prev) |prev| {
@@ -234,30 +233,67 @@ pub const NarArchive = struct {
         return self;
     }
 
-    //fn dumpNonDir(object: *Object, writer: anytype) !void {
-    //    try writer.writeAll(str("(") ++ str("type"));
-    //    switch (object.data) {
-    //        .file => |metadata| {
-    //            try writer.writeAll(str("regular"));
-    //            if (metadata.is_executable) try writer.writeAll(str("executable"), str(""));
-    //            try writer.writeAll(str("contents"));
-    //            try strWriter(metadata.contents, writer);
-    //        },
-    //        .symlink => |target| {
-    //            try writer.writeAll(str("symlink") ++ str("target"));
-    //            try strWriter(metadata, writer);
-    //        },
-    //        .directory => unreachable,
-    //    }
-    //    try writer.writeAll(str(")"));
-    //}
+    /// Creates a NAR archive containing a single file given its contents.
+    pub fn fromFileContents(
+        allocator: std.mem.Allocator,
+        contents: []const u8,
+        is_executable: bool,
+    ) std.mem.Allocator.Error!NarArchive {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        var pool = std.heap.MemoryPool(Object).init(arena.allocator());
+        errdefer arena.deinit();
+
+        const copy = try arena.allocator().dupe(u8, contents);
+
+        const node = try pool.create();
+
+        node.* = .{
+            .parent = null,
+            .prev = null,
+            .next = null,
+            .name = null,
+            .data = .{ .file = .{ .is_executable = is_executable, .contents = copy } },
+        };
+
+        return .{
+            .arena = arena,
+            .pool = pool,
+            .root = node,
+        };
+    }
+
+    /// Creates a NAR archive containing a single symlink given its target.
+    pub fn fromSymlink(
+        allocator: std.mem.Allocator,
+        target: []const u8,
+    ) std.mem.Allocator.Error!NarArchive {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        var pool = std.heap.MemoryPool(Object).init(arena.allocator());
+        errdefer arena.deinit();
+
+        const node = try pool.create();
+
+        const copy = try arena.allocator().dupe(u8, target);
+
+        node.* = .{
+            .parent = null,
+            .prev = null,
+            .next = null,
+            .name = null,
+            .data = .{ .symlink = copy },
+        };
+
+        return .{
+            .arena = arena,
+            .pool = pool,
+            .root = node,
+        };
+    }
 
     pub fn dump(self: *NarArchive, writer: anytype) !void {
         var node = self.root;
 
         try writer.writeAll(comptime str("nix-archive-1"));
-
-        //if (node.data != .directory) return try dumpNonDir(node, writer);
 
         while (true) {
             if (node.parent != null) {
@@ -293,6 +329,7 @@ pub const NarArchive = struct {
             while (node.parent != null and node.next == null) {
                 try writer.writeAll(comptime str(")"));
                 node = node.parent.?;
+                if (node.parent != null) try writer.writeAll(comptime str(")"));
             } else if (node.parent != null) node = node.next.? else return;
         }
     }
@@ -384,7 +421,7 @@ fn strWriter(string: []u8, writer: anytype) !void {
 
     const zeroes: [7]u8 = .{0} ** 7;
 
-    try writer.print("{s}{s}{s}", .{ &buffer, string, zeroes[0 .. (8 - (string.len % 8) % 8)] });
+    try writer.print("{s}{s}{s}", .{ &buffer, string, zeroes[0..(8 - string.len % 8) % 8] });
 }
 
 fn str(comptime string: anytype) []const u8 {
@@ -393,7 +430,7 @@ fn str(comptime string: anytype) []const u8 {
         mem.writeInt(u64, &buffer, string.len, .little);
 
         const zeroes: [7]u8 = .{0} ** 7;
-        return buffer ++ string ++ (if (string.len % 8 == 0) [0]u8{} else zeroes[0 .. 8 - (string.len % 8)]);
+        return buffer ++ string ++ (if (string.len % 8 == 0) [0]u8{} else zeroes[0 .. (8 - string.len % 8) % 8]);
     }
 }
 
@@ -467,7 +504,7 @@ test "nar from dir-and-files" {
     //try expectEqualStrings("dir", dir.name.?);
 
     const file1 = dir.next.?;
-    try expectEqual(file1.next, null);
+    try expectEqual(null, file1.next);
     try expectEqualStrings("file1", file1.name.?);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
@@ -504,10 +541,10 @@ test "nar to directory to nar" {
 
     const expected = @embedFile("tests/dir-and-files.nar");
 
-    var buffer: [expected.len]u8 = undefined;
+    var buffer: [2 * expected.len]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
 
     try data.dump(stream.writer());
 
-    try expectEqual(expected, stream.getWritten());
+    try std.testing.expectEqualSlices(u8, expected, stream.getWritten());
 }
