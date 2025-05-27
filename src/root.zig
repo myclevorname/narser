@@ -8,6 +8,16 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const mem = std.mem;
 const divCeil = std.math.divCeil;
 
+/// A Nix Archive file.
+///
+/// Preconditions:
+///
+/// 1. The object pointed to by root must have no name, no previous or next, and no parent.
+///
+/// 2. The object a directory points to must have a name, have no previous object, and has a parent
+/// set to said directory.
+///
+/// 3. All objects in a directory must be sorted by name and must be unique within a directory.
 pub const NarArchive = struct {
     arena: std.heap.ArenaAllocator,
     pool: std.heap.MemoryPool(Object),
@@ -15,7 +25,6 @@ pub const NarArchive = struct {
 
     /// Takes ownership of a slice representing a Nix archive and deserializes it.
     /// Guaranteed to not modify the slice if an error occurs.
-    /// TODO: Add validation for directory listing order
     pub fn fromSlice(allocator: std.mem.Allocator, slice: []u8) EncodeError!NarArchive {
         var self: NarArchive = .{
             .arena = .init(allocator),
@@ -42,7 +51,6 @@ pub const NarArchive = struct {
                 if (recursion_depth == 0) break :loop;
                 prevLevel(&to_parse, &recursion_depth) catch |err| switch (err) {
                     error.InvalidFormat => break :blk,
-                    error.UnbalancedParens => return err,
                     else => unreachable,
                 };
 
@@ -75,6 +83,13 @@ pub const NarArchive = struct {
                 try nextLevel(&to_parse, &recursion_depth);
                 try expectMatch(&to_parse, "name");
                 next.name = try unstr(&to_parse);
+
+                if (prev) |p| switch (mem.order(u8, p.name.?, next.name.?)) {
+                    .lt => {},
+                    .eq => return error.DuplicateObjectName,
+                    .gt => return error.WrongDirectoryOrder,
+                };
+
                 try expectMatch(&to_parse, "node");
                 try nextLevel(&to_parse, &recursion_depth);
             }
@@ -107,9 +122,6 @@ pub const NarArchive = struct {
                 in_directory = true;
             } else return error.InvalidFormat;
         }
-
-        if (recursion_depth != 0) return error.UnbalancedParens;
-        if (to_parse.len != 0) return error.InvalidFormat;
 
         self.root = root orelse return error.InvalidFormat;
         return self;
@@ -160,7 +172,7 @@ pub const NarArchive = struct {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
                     break :blk try entry.dir.readLink(entry.basename, &buf);
                 } },
-                .file => .{ .file = .{
+                else => .{ .file = .{
                     .contents = try entry.dir.readFileAlloc(
                         self.arena.allocator(),
                         entry.basename,
@@ -168,7 +180,6 @@ pub const NarArchive = struct {
                     ),
                     .is_executable = (try entry.dir.statFile(entry.basename)).mode & 0x01 == 1,
                 } },
-                else => @panic("TODO: entry categorization"),
             };
 
             blk: {
@@ -179,7 +190,7 @@ pub const NarArchive = struct {
                 } else {
                     for (next_depth..prev_depth) |_| {
                         prev_node = prev_node.parent.?;
-                }
+                    }
                     next_node.parent = prev_node.parent;
 
                     search: while (prev_node.prev) |prev| {
@@ -223,6 +234,69 @@ pub const NarArchive = struct {
         return self;
     }
 
+    //fn dumpNonDir(object: *Object, writer: anytype) !void {
+    //    try writer.writeAll(str("(") ++ str("type"));
+    //    switch (object.data) {
+    //        .file => |metadata| {
+    //            try writer.writeAll(str("regular"));
+    //            if (metadata.is_executable) try writer.writeAll(str("executable"), str(""));
+    //            try writer.writeAll(str("contents"));
+    //            try strWriter(metadata.contents, writer);
+    //        },
+    //        .symlink => |target| {
+    //            try writer.writeAll(str("symlink") ++ str("target"));
+    //            try strWriter(metadata, writer);
+    //        },
+    //        .directory => unreachable,
+    //    }
+    //    try writer.writeAll(str(")"));
+    //}
+
+    pub fn dump(self: *NarArchive, writer: anytype) !void {
+        var node = self.root;
+
+        try writer.writeAll(comptime str("nix-archive-1"));
+
+        //if (node.data != .directory) return try dumpNonDir(node, writer);
+
+        while (true) {
+            if (node.parent != null) {
+                try writer.writeAll(comptime str("entry") ++ str("(") ++ str("name"));
+                try strWriter(node.name.?, writer);
+                try writer.writeAll(comptime str("node"));
+            }
+
+            try writer.writeAll(comptime str("(") ++ str("type"));
+            switch (node.data) {
+                .directory => |child| {
+                    try writer.writeAll(comptime str("directory"));
+                    if (child) |next| {
+                        node = next;
+                        continue;
+                    }
+                },
+                .file => |data| {
+                    try writer.writeAll(comptime str("regular"));
+                    if (data.is_executable) try writer.writeAll(comptime str("executable") ++ str(""));
+                    try writer.writeAll(comptime str("contents"));
+                    try strWriter(data.contents, writer);
+                },
+                .symlink => |link| {
+                    try writer.writeAll(comptime str("symlink") ++ str("target"));
+                    try strWriter(link, writer);
+                },
+            }
+            try writer.writeAll(comptime str(")"));
+            if (node.parent != null) {
+                try writer.writeAll(comptime str(")"));
+            }
+            while (node.parent != null and node.next == null) {
+                try writer.writeAll(comptime str(")"));
+                node = node.parent.?;
+            } else if (node.parent != null) node = node.next.? else return;
+        }
+    }
+
     pub fn deinit(self: *NarArchive) void {
         self.arena.deinit();
         self.* = undefined;
@@ -252,12 +326,11 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     InvalidFormat,
     WrongDirectoryOrder,
     DuplicateObjectName,
-    UnbalancedParens,
 };
 
 fn prevLevel(slice: *[]u8, depth: *u64) EncodeError!void {
     if (!matchAndSlide(slice, ")")) return error.InvalidFormat;
-    if (depth.* == 0) return error.UnbalancedParens else depth.* -= 1;
+    if (depth.* == 0) unreachable else depth.* -= 1;
 }
 
 fn nextLevel(slice: *[]u8, depth: *u64) EncodeError!void {
@@ -305,10 +378,23 @@ fn unstr(slice: *[]u8) EncodeError![]u8 {
     return result;
 }
 
-fn str(comptime string: []const u8) []const u8 {
+fn strWriter(string: []u8, writer: anytype) !void {
     var buffer: [8]u8 = undefined;
     mem.writeInt(u64, &buffer, string.len, .little);
-    return buffer ++ string ++ (if (string.len % 8 == 0) [_]u8{} else [_]u8{0} ** (8 - (string.len % 8)));
+
+    const zeroes: [7]u8 = .{0} ** 7;
+
+    try writer.print("{s}{s}{s}", .{ &buffer, string, zeroes[0 .. (8 - (string.len % 8) % 8)] });
+}
+
+fn str(comptime string: anytype) []const u8 {
+    comptime {
+        var buffer: [8]u8 = undefined;
+        mem.writeInt(u64, &buffer, string.len, .little);
+
+        const zeroes: [7]u8 = .{0} ** 7;
+        return buffer ++ string ++ (if (string.len % 8 == 0) [0]u8{} else zeroes[0 .. 8 - (string.len % 8)]);
+    }
 }
 
 test "single file" {
@@ -371,7 +457,6 @@ test "a symlink" {
 test "nar from dir-and-files" {
     const allocator = std.testing.allocator;
 
-    // TODO: Use build options instead of this
     var root = try std.fs.cwd().openDir(tests_path ++ "/dir-and-files", .{ .iterate = true });
     defer root.close();
 
@@ -402,7 +487,6 @@ test "nar from dir-and-files" {
 test "empty directory" {
     const allocator = std.testing.allocator;
 
-    // TODO: Use build options instead of this
     var root = try std.fs.cwd().openDir(tests_path ++ "/empty", .{ .iterate = true });
     defer root.close();
 
@@ -410,4 +494,20 @@ test "empty directory" {
     defer data.deinit();
 
     try expectEqual(null, data.root.data.directory);
+}
+
+test "nar to directory to nar" {
+    const allocator = std.testing.allocator;
+
+    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/dir-and-files.nar")));
+    defer data.deinit();
+
+    const expected = @embedFile("tests/dir-and-files.nar");
+
+    var buffer: [expected.len]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buffer);
+
+    try data.dump(stream.writer());
+
+    try expectEqual(expected, stream.getWritten());
 }

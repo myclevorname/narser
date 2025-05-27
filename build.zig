@@ -2,6 +2,10 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+
+    if (target.result.os.tag == .windows)
+        @panic("Windows does not support the file executable attribute. Try using WSL.");
+
     const optimize = b.standardOptimizeOption(.{});
 
     const narser = b.addModule("narser", .{
@@ -20,7 +24,7 @@ pub fn build(b: *std.Build) void {
     tests_path.addOptionPath("tests_path", b.path("src/tests"));
     narser.addImport("tests", tests_path.createModule());
 
-    narser.addImport("narser", narser);
+    exe_mod.addImport("narser", narser);
 
     const lib_mod = b.addModule("libnarser", .{
         .root_source_file = b.path("src/lib.zig"),
