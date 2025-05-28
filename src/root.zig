@@ -169,7 +169,8 @@ pub const NarArchive = struct {
                 .directory => .{ .directory = null },
                 .sym_link => .{ .symlink = blk: {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
-                    break :blk try entry.dir.readLink(entry.basename, &buf);
+                    const target = try entry.dir.readLink(entry.basename, &buf);
+                    break :blk try self.arena.allocator().dupe(u8, target);
                 } },
                 else => .{ .file = .{
                     .contents = try entry.dir.readFileAlloc(

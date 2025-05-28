@@ -10,8 +10,7 @@ pub fn lsRecursive(archive: *const narser.NarArchive, writer: anytype) !void {
 
     switch (node.data) {
         .directory => {},
-        .file => return try writer.writeAll("<file>\n"),
-        .symlink => return try writer.writeAll("<symlink>\n"),
+        .file, .symlink => return try writer.writeAll("<\n"),
     }
 
     while (true) {
