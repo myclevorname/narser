@@ -2,11 +2,12 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Remove debugging symbols");
+
 
     if (target.result.os.tag == .windows)
         @panic("Windows does not support the file executable attribute. Try using WSL.");
-
-    const optimize = b.standardOptimizeOption(.{});
 
     const narser = b.addModule("narser", .{
         .root_source_file = b.path("src/root.zig"),
@@ -18,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = strip,
     });
 
     var tests_path = std.Build.Step.Options.create(b);

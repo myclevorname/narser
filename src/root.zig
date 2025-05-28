@@ -190,7 +190,6 @@ pub const NarArchive = struct {
                     for (next_depth..prev_depth) |_| {
                         prev_node = prev_node.parent.?;
                     }
-                    prev_depth = next_depth;
                     next_node.parent = prev_node.parent;
 
                     search: while (prev_node.prev) |prev| {
@@ -291,7 +290,7 @@ pub const NarArchive = struct {
         };
     }
 
-    pub fn dump(self: *NarArchive, writer: anytype) !void {
+    pub fn dump(self: *const NarArchive, writer: anytype) !void {
         var node = self.root;
 
         try writer.writeAll(comptime str("nix-archive-1"));

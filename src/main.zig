@@ -47,7 +47,11 @@ fn printPath(node: *narser.Object, writer: anytype) !void {
 }
 
 pub fn main() !void {
-    const writer = std.io.getStdOut().writer();
+    var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
+    defer bw.flush() catch @panic("Failed to fully flush stdout buffer");
+
+
+    const writer = bw.writer();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
