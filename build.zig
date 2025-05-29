@@ -5,7 +5,6 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const strip = b.option(bool, "strip", "Remove debugging symbols");
 
-
     if (target.result.os.tag == .windows)
         @panic("Windows does not support the file executable attribute. Try using WSL.");
 

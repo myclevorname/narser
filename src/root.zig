@@ -135,7 +135,7 @@ pub const NarArchive = struct {
         self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
-        var root_node = try self.pool.create();
+        const root_node = try self.pool.create();
         root_node.* = .{
             .parent = null,
             .name = null,
@@ -145,14 +145,12 @@ pub const NarArchive = struct {
 
         var iters: std.BoundedArray(struct {
             iterator: std.fs.Dir.Iterator, // holds the directory
-            end: *?*std.DoublyLinkedList.Node, // mst always point to a null value
-            parent: *Object,
+            object: *Object,
         }, 256) = .{};
-        
+
         iters.appendAssumeCapacity(.{
             .iterator = root.iterate(),
-            .end = &root_node.data.directory,
-            .parent = root_node,
+            .object = root_node,
         });
 
         errdefer if (iters.len > 1) for (iters.slice()[1..]) |*x| x.iterator.dir.close();
@@ -166,42 +164,69 @@ pub const NarArchive = struct {
                 switch (e.kind) {
                     .directory => {
                         next.* = .{
-                            .parent = @fieldParentPtr("list", @as(*std.DoublyLinkedList.Node, @fieldParentPtr("next", cur.end))),
+                            .parent = cur.object,
                             .name = try self.arena.allocator().dupe(u8, e.name),
                             .data = .{ .directory = null },
                         };
                         var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
-                        try iters.append(.{
+                        iters.append(.{
                             .iterator = child.iterate(),
-                            .end = &next.data.directory,
-                            .parent = next,
-                        });
+                            .object = next,
+                        }) catch @panic("Implementation limit reached: Directory nested too deeply");
                     },
-                    .sym_link => @panic("TODO: Symlinking"),
+                    .sym_link => {
+                        next.* = .{
+                            .parent = cur.object,
+                            .name = try self.arena.allocator().dupe(u8, e.name),
+                            .data = .{ .symlink = undefined },
+                        };
+                        var buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const link = try cur.iterator.dir.readLink(e.name, &buf);
+                        next.data.symlink = try self.arena.allocator().dupe(u8, link);
+                    },
                     else => {
                         next.* = .{
-                            .parent = cur.parent,
+                            .parent = cur.object,
                             .name = try self.arena.allocator().dupe(u8, e.name),
                             .data = .{ .file = undefined },
                         };
                         const stat = try cur.iterator.dir.statFile(e.name);
-                        const contents = try cur.iterator.dir.readFileAllocOptions(
-                            self.arena.allocator(),
-                            e.name,
-                            std.math.maxInt(usize),
-                            stat.size,
-                            .of(u8),
-                            null
-                        );
+                        const contents = try cur.iterator.dir.readFileAllocOptions(self.arena.allocator(), e.name, std.math.maxInt(usize), stat.size, .of(u8), null);
                         next.data.file = .{
                             .contents = contents,
                             .is_executable = stat.mode & 1 == 1,
                         };
                     },
                 }
-                if (e.kind != .directory) {
-                    @panic("TODO: File ordering");
-                }
+                if (cur.object.data.directory) |first|
+                    switch (mem.order(u8, first.name.?, next.name.?)) {
+                        .lt => {
+                            var left = first;
+                            while (left.list.next != null and mem.order(u8, left.name.?, next.name.?) == .lt) {
+                                left = left.next().?;
+                            } else switch (mem.order(u8, left.name.?, next.name.?)) {
+                                .eq => {
+                                    @branchHint(.cold);
+                                    return error.Unexpected;
+                                },
+                                .lt => left.list.next = &next.list,
+                                .gt => {
+                                    next.list.prev = left.list.prev;
+                                    next.list.next = &left.list;
+                                    if (left.list.prev) |p| p.next = &next.list;
+                                    left.list.prev = &next.list;
+                                },
+                            }
+                        },
+                        .eq => return error.Unexpected,
+                        .gt => {
+                            first.list.prev = &next.list;
+                            next.list.next = &first.list;
+                            cur.object.data.directory = next;
+                        },
+                    }
+                else
+                    cur.object.data.directory = next;
             } else {
                 if (iters.len > 1) cur.iterator.dir.close();
                 _ = iters.pop().?;
@@ -401,7 +426,7 @@ fn strWriter(string: []u8, writer: anytype) !void {
 
     const zeroes: [7]u8 = .{0} ** 7;
 
-    try writer.print("{s}{s}{s}", .{ &buffer, string, zeroes[0..(8 - string.len % 8) % 8] });
+    try writer.print("{s}{s}{s}", .{ &buffer, string, zeroes[0 .. (8 - string.len % 8) % 8] });
 }
 
 fn str(comptime string: anytype) []const u8 {

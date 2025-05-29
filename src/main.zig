@@ -50,7 +50,6 @@ pub fn main() !void {
     var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
     defer bw.flush() catch @panic("Failed to fully flush stdout buffer");
 
-
     const writer = bw.writer();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
