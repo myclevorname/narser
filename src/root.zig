@@ -71,8 +71,7 @@ pub const NarArchive = struct {
 
             var next = try self.pool.create();
             next.* = .{
-                .prev = prev,
-                .next = null,
+                .list = .{ .prev = if (prev) |p| &p.list else null, .next = null },
                 .parent = parent,
                 .data = undefined,
                 .name = null,
@@ -94,7 +93,7 @@ pub const NarArchive = struct {
                 try nextLevel(&to_parse, &recursion_depth);
             }
             if (prev) |obj| {
-                obj.next = next;
+                obj.list.next = &next.list;
             } else if (parent) |obj| obj.data.directory = next;
             if (root == null) root = next;
 
@@ -136,100 +135,79 @@ pub const NarArchive = struct {
         self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
-        const root_node = try self.pool.create();
+        var root_node = try self.pool.create();
         root_node.* = .{
             .parent = null,
-            .prev = null,
-            .next = null,
             .name = null,
             .data = .{ .directory = null },
         };
         self.root = root_node;
 
-        var walker = try root.walk(allocator);
-        defer walker.deinit();
+        var iters: std.BoundedArray(struct {
+            iterator: std.fs.Dir.Iterator, // holds the directory
+            end: *?*std.DoublyLinkedList.Node, // mst always point to a null value
+            parent: *Object,
+        }, 256) = .{};
+        
+        iters.appendAssumeCapacity(.{
+            .iterator = root.iterate(),
+            .end = &root_node.data.directory,
+            .parent = root_node,
+        });
 
-        var prev_node = root_node;
+        errdefer if (iters.len > 1) for (iters.slice()[1..]) |*x| x.iterator.dir.close();
 
-        var prev_depth: usize = 0;
-        var next_depth: usize = undefined;
+        while (iters.len != 0) {
+            var cur = &iters.slice()[iters.len - 1];
+            const entry = try cur.iterator.next();
 
-        while (try walker.next()) |entry| {
-            var next_node = try self.pool.create();
-            next_node.* = .{
-                .parent = undefined,
-                .prev = null,
-                .next = null,
-                .name = try self.arena.allocator().dupe(u8, entry.basename),
-                .data = undefined,
-            };
-
-            next_depth = 1 + std.mem.count(u8, entry.path, "/");
-            next_node.data = switch (entry.kind) {
-                .directory => .{ .directory = null },
-                .sym_link => .{ .symlink = blk: {
-                    var buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const target = try entry.dir.readLink(entry.basename, &buf);
-                    break :blk try self.arena.allocator().dupe(u8, target);
-                } },
-                else => .{ .file = .{
-                    .contents = try entry.dir.readFileAlloc(
-                        self.arena.allocator(),
-                        entry.basename,
-                        std.math.maxInt(usize),
-                    ),
-                    .is_executable = (try entry.dir.statFile(entry.basename)).mode & 0x01 == 1,
-                } },
-            };
-
-            blk: {
-                if (next_depth > prev_depth) {
-                    prev_node.data.directory = next_node;
-                    next_node.parent = prev_node;
-                } else {
-                    for (next_depth..prev_depth) |_| {
-                        prev_node = prev_node.parent.?;
-                    }
-                    next_node.parent = prev_node.parent;
-
-                    search: while (prev_node.prev) |prev| {
-                        switch (mem.order(u8, prev.name.?, entry.basename)) {
-                            .lt => break :search,
-                            .eq => return error.DuplicateObjectName,
-                            .gt => prev_node = prev,
-                        }
-                    }
-                    search: while (true) {
-                        switch (mem.order(u8, entry.basename, prev_node.name.?)) {
-                            .lt => break :search,
-                            .eq => return error.DuplicateObjectName,
-                            .gt => prev_node = prev_node.next orelse {
-                                prev_node.next = next_node;
-                                next_node.prev = prev_node;
-                                break :blk;
-                            },
-                        }
-                    }
-
-                    // insert next_node to the left of prev_node, adjusting
-                    // prev_node.parent.?.data.directory if needed
-                    if (prev_node.prev == null) {
-                        prev_node.parent.?.data.directory = next_node;
-                        prev_node.prev = next_node;
-                        next_node.next = prev_node;
-                        break :blk;
-                    }
-
-                    next_node.prev = prev_node.prev;
-                    next_node.next = prev_node;
-                    prev_node.prev.?.next = next_node;
-                    prev_node.prev = next_node;
+            if (entry) |e| {
+                const next = try self.pool.create();
+                switch (e.kind) {
+                    .directory => {
+                        next.* = .{
+                            .parent = @fieldParentPtr("list", @as(*std.DoublyLinkedList.Node, @fieldParentPtr("next", cur.end))),
+                            .name = try self.arena.allocator().dupe(u8, e.name),
+                            .data = .{ .directory = null },
+                        };
+                        var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
+                        try iters.append(.{
+                            .iterator = child.iterate(),
+                            .end = &next.data.directory,
+                            .parent = next,
+                        });
+                    },
+                    .sym_link => @panic("TODO: Symlinking"),
+                    else => {
+                        next.* = .{
+                            .parent = cur.parent,
+                            .name = try self.arena.allocator().dupe(u8, e.name),
+                            .data = .{ .file = undefined },
+                        };
+                        const stat = try cur.iterator.dir.statFile(e.name);
+                        const contents = try cur.iterator.dir.readFileAllocOptions(
+                            self.arena.allocator(),
+                            e.name,
+                            std.math.maxInt(usize),
+                            stat.size,
+                            .of(u8),
+                            null
+                        );
+                        next.data.file = .{
+                            .contents = contents,
+                            .is_executable = stat.mode & 1 == 1,
+                        };
+                    },
                 }
+                if (e.kind != .directory) {
+                    @panic("TODO: File ordering");
+                }
+            } else {
+                if (iters.len > 1) cur.iterator.dir.close();
+                _ = iters.pop().?;
             }
-
-            prev_node = next_node;
-            prev_depth = next_depth;
         }
+
         return self;
     }
 
@@ -249,8 +227,6 @@ pub const NarArchive = struct {
 
         node.* = .{
             .parent = null,
-            .prev = null,
-            .next = null,
             .name = null,
             .data = .{ .file = .{ .is_executable = is_executable, .contents = copy } },
         };
@@ -277,8 +253,6 @@ pub const NarArchive = struct {
 
         node.* = .{
             .parent = null,
-            .prev = null,
-            .next = null,
             .name = null,
             .data = .{ .symlink = copy },
         };
@@ -326,11 +300,11 @@ pub const NarArchive = struct {
             if (node.parent != null) {
                 try writer.writeAll(comptime str(")"));
             }
-            while (node.parent != null and node.next == null) {
+            while (node.parent != null and node.list.next == null) {
                 try writer.writeAll(comptime str(")"));
                 node = node.parent.?;
                 if (node.parent != null) try writer.writeAll(comptime str(")"));
-            } else if (node.parent != null) node = node.next.? else return;
+            } else if (node.parent != null) node = node.next().? else return;
         }
     }
 
@@ -342,8 +316,7 @@ pub const NarArchive = struct {
 
 pub const Object = struct {
     parent: ?*Object,
-    prev: ?*Object,
-    next: ?*Object,
+    list: std.DoublyLinkedList.Node = .{ .prev = null, .next = null },
     name: ?[]u8,
     data: Data,
 
@@ -352,6 +325,13 @@ pub const Object = struct {
         symlink: []u8,
         directory: ?*Object,
     };
+
+    pub inline fn prev(self: *const Object) ?*Object {
+        return @fieldParentPtr("list", self.list.prev orelse return null);
+    }
+    pub inline fn next(self: *const Object) ?*Object {
+        return @fieldParentPtr("list", self.list.next orelse return null);
+    }
 };
 
 pub const File = struct {
@@ -464,8 +444,8 @@ test "a file, a directory, and some more files" {
     const dir = data.root.data.directory.?;
     try expectEqualStrings("dir", dir.name.?);
 
-    const file1 = dir.next.?;
-    try expectEqual(file1.next, null);
+    const file1 = dir.next().?;
+    try expectEqual(file1.list.next, null);
     try expectEqualStrings("file1", file1.name.?);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
@@ -475,11 +455,11 @@ test "a file, a directory, and some more files" {
     try expectEqual(true, file2.data.file.is_executable);
     try expectEqualStrings("bye\n", file2.data.file.contents);
 
-    const file3 = file2.next.?;
+    const file3 = file2.next().?;
     try expectEqual(false, file3.data.file.is_executable);
     try expectEqualStrings("file3", file3.name.?);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.next);
+    try expectEqual(null, file3.list.next);
 }
 
 test "a symlink" {
@@ -503,8 +483,8 @@ test "nar from dir-and-files" {
     const dir = data.root.data.directory.?;
     //try expectEqualStrings("dir", dir.name.?);
 
-    const file1 = dir.next.?;
-    try expectEqual(null, file1.next);
+    const file1 = dir.next().?;
+    try expectEqual(null, file1.next());
     try expectEqualStrings("file1", file1.name.?);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
@@ -514,11 +494,11 @@ test "nar from dir-and-files" {
     try expectEqual(true, file2.data.file.is_executable);
     try expectEqualStrings("bye\n", file2.data.file.contents);
 
-    const file3 = file2.next.?;
+    const file3 = file2.next().?;
     try expectEqual(false, file3.data.file.is_executable);
     try expectEqualStrings("file3", file3.name.?);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.next);
+    try expectEqual(null, file3.next());
 }
 
 test "empty directory" {
