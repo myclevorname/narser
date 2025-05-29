@@ -10,7 +10,7 @@ pub fn lsRecursive(archive: *const narser.NarArchive, writer: anytype) !void {
 
     switch (node.data) {
         .directory => {},
-        .file, .symlink => return try writer.writeAll("<\n"),
+        .file, .symlink => return try writer.writeAll("\n"),
     }
 
     while (true) {
@@ -20,7 +20,7 @@ pub fn lsRecursive(archive: *const narser.NarArchive, writer: anytype) !void {
             while (node.list.next == null) {
                 node = node.parent orelse return;
             }
-            node = @fieldParentPtr("list", node.list.next.?);
+            node = node.next().?;
         }
         try printPath(node, writer);
     }
@@ -39,6 +39,8 @@ fn printPath(node: *narser.Object, writer: anytype) !void {
     var iter = std.mem.reverseIterator(buf[0 .. count - 1]);
 
     if (count == 1) return;
+
+    try writer.print(".", .{});
 
     while (iter.next()) |x| {
         try writer.print("/{s}", .{x});

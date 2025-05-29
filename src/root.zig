@@ -191,7 +191,14 @@ pub const NarArchive = struct {
                             .data = .{ .file = undefined },
                         };
                         const stat = try cur.iterator.dir.statFile(e.name);
-                        const contents = try cur.iterator.dir.readFileAllocOptions(self.arena.allocator(), e.name, std.math.maxInt(usize), stat.size, .of(u8), null);
+                        const contents = try cur.iterator.dir.readFileAllocOptions(
+                            self.arena.allocator(),
+                            e.name,
+                            std.math.maxInt(usize),
+                            stat.size,
+                            .of(u8),
+                            null,
+                        );
                         next.data.file = .{
                             .contents = contents,
                             .is_executable = stat.mode & 1 == 1,
@@ -209,7 +216,10 @@ pub const NarArchive = struct {
                                     @branchHint(.cold);
                                     return error.Unexpected;
                                 },
-                                .lt => left.list.next = &next.list,
+                                .lt => {
+                                    left.list.next = &next.list;
+                                    next.list.prev = &left.list;
+                                },
                                 .gt => {
                                     next.list.prev = left.list.prev;
                                     next.list.next = &left.list;
