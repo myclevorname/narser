@@ -8,6 +8,15 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const mem = std.mem;
 const divCeil = std.math.divCeil;
 
+/// An alternative @alignOf and std.mem.Alignment.of that changes output based on compiler version.
+inline fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.? {
+    return switch (@typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.?) {
+        ?std.mem.Alignment => std.mem.Alignment.of(T),
+        ?u29 => @alignOf(T),
+        else => |x| @compileError("Expected ?std.mem.Alignment or ?u29, found \"" ++ @typeName(x) ++ "\""),
+    };
+}
+
 /// A Nix Archive file.
 ///
 /// Preconditions:
@@ -71,7 +80,8 @@ pub const NarArchive = struct {
 
             var next = try self.pool.create();
             next.* = .{
-                .list = .{ .prev = if (prev) |p| &p.list else null, .next = null },
+                .prev = prev,
+                .next = null,
                 .parent = parent,
                 .data = undefined,
                 .name = null,
@@ -93,7 +103,7 @@ pub const NarArchive = struct {
                 try nextLevel(&to_parse, &recursion_depth);
             }
             if (prev) |obj| {
-                obj.list.next = &next.list;
+                obj.next = next;
             } else if (parent) |obj| obj.data.directory = next;
             if (root == null) root = next;
 
@@ -196,7 +206,7 @@ pub const NarArchive = struct {
                             e.name,
                             std.math.maxInt(usize),
                             stat.size,
-                            .of(u8),
+                            alignOf(u8).?,
                             null,
                         );
                         next.data.file = .{
@@ -209,29 +219,29 @@ pub const NarArchive = struct {
                     switch (mem.order(u8, first.name.?, next.name.?)) {
                         .lt => {
                             var left = first;
-                            while (left.list.next != null and mem.order(u8, left.name.?, next.name.?) == .lt) {
-                                left = left.next().?;
+                            while (left.next != null and mem.order(u8, left.name.?, next.name.?) == .lt) {
+                                left = left.next.?;
                             } else switch (mem.order(u8, left.name.?, next.name.?)) {
                                 .eq => {
                                     @branchHint(.cold);
                                     return error.Unexpected;
                                 },
                                 .lt => {
-                                    left.list.next = &next.list;
-                                    next.list.prev = &left.list;
+                                    left.next = next;
+                                    next.prev = left;
                                 },
                                 .gt => {
-                                    next.list.prev = left.list.prev;
-                                    next.list.next = &left.list;
-                                    if (left.list.prev) |p| p.next = &next.list;
-                                    left.list.prev = &next.list;
+                                    next.prev = left.prev;
+                                    next.next = left;
+                                    if (left.prev) |p| p.next = next;
+                                    left.prev = next;
                                 },
                             }
                         },
                         .eq => return error.Unexpected,
                         .gt => {
-                            first.list.prev = &next.list;
-                            next.list.next = &first.list;
+                            first.prev = next;
+                            next.next = first;
                             cur.object.data.directory = next;
                         },
                     }
@@ -335,11 +345,11 @@ pub const NarArchive = struct {
             if (node.parent != null) {
                 try writer.writeAll(comptime str(")"));
             }
-            while (node.parent != null and node.list.next == null) {
+            while (node.parent != null and node.next == null) {
                 try writer.writeAll(comptime str(")"));
                 node = node.parent.?;
                 if (node.parent != null) try writer.writeAll(comptime str(")"));
-            } else if (node.parent != null) node = node.next().? else return;
+            } else if (node.parent != null) node = node.next.? else return;
         }
     }
 
@@ -351,7 +361,8 @@ pub const NarArchive = struct {
 
 pub const Object = struct {
     parent: ?*Object,
-    list: std.DoublyLinkedList.Node = .{ .prev = null, .next = null },
+    prev: ?*Object = null,
+    next: ?*Object = null,
     name: ?[]u8,
     data: Data,
 
@@ -360,13 +371,6 @@ pub const Object = struct {
         symlink: []u8,
         directory: ?*Object,
     };
-
-    pub inline fn prev(self: *const Object) ?*Object {
-        return @fieldParentPtr("list", self.list.prev orelse return null);
-    }
-    pub inline fn next(self: *const Object) ?*Object {
-        return @fieldParentPtr("list", self.list.next orelse return null);
-    }
 };
 
 pub const File = struct {
@@ -479,8 +483,8 @@ test "a file, a directory, and some more files" {
     const dir = data.root.data.directory.?;
     try expectEqualStrings("dir", dir.name.?);
 
-    const file1 = dir.next().?;
-    try expectEqual(file1.list.next, null);
+    const file1 = dir.next.?;
+    try expectEqual(file1.next, null);
     try expectEqualStrings("file1", file1.name.?);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
@@ -490,11 +494,11 @@ test "a file, a directory, and some more files" {
     try expectEqual(true, file2.data.file.is_executable);
     try expectEqualStrings("bye\n", file2.data.file.contents);
 
-    const file3 = file2.next().?;
+    const file3 = file2.next.?;
     try expectEqual(false, file3.data.file.is_executable);
     try expectEqualStrings("file3", file3.name.?);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.list.next);
+    try expectEqual(null, file3.next);
 }
 
 test "a symlink" {
@@ -518,8 +522,8 @@ test "nar from dir-and-files" {
     const dir = data.root.data.directory.?;
     //try expectEqualStrings("dir", dir.name.?);
 
-    const file1 = dir.next().?;
-    try expectEqual(null, file1.next());
+    const file1 = dir.next.?;
+    try expectEqual(null, file1.next);
     try expectEqualStrings("file1", file1.name.?);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
@@ -529,11 +533,11 @@ test "nar from dir-and-files" {
     try expectEqual(true, file2.data.file.is_executable);
     try expectEqualStrings("bye\n", file2.data.file.contents);
 
-    const file3 = file2.next().?;
+    const file3 = file2.next.?;
     try expectEqual(false, file3.data.file.is_executable);
     try expectEqualStrings("file3", file3.name.?);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.next());
+    try expectEqual(null, file3.next);
 }
 
 test "empty directory" {

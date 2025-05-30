@@ -17,10 +17,10 @@ pub fn lsRecursive(archive: *const narser.NarArchive, writer: anytype) !void {
         if (node.data == .directory and node.data.directory != null) {
             node = node.data.directory.?;
         } else {
-            while (node.list.next == null) {
+            while (node.next == null) {
                 node = node.parent orelse return;
             }
-            node = node.next().?;
+            node = node.next.?;
         }
         try printPath(node, writer);
     }
