@@ -14,18 +14,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const exe_mod = b.addModule("narser_bin", .{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .strip = strip,
-    });
-
     var tests_path = std.Build.Step.Options.create(b);
     tests_path.addOptionPath("tests_path", b.path("src/tests"));
     narser.addImport("tests", tests_path.createModule());
-
-    exe_mod.addImport("narser", narser);
 
     const lib_mod = b.addModule("libnarser", .{
         .root_source_file = b.path("src/lib.zig"),
@@ -39,11 +30,20 @@ pub fn build(b: *std.Build) void {
         .root_module = lib_mod,
     });
 
-    b.installArtifact(lib);
+    const lib_install = b.addInstallArtifact(lib, .{});
+
+    const lib_step = b.step("lib", "Build the experimental C library");
+    lib_step.dependOn(&lib_install.step);
 
     const exe = b.addExecutable(.{
         .name = "narser",
-        .root_module = exe_mod,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            .imports = &.{ .{ .name = "narser", .module = narser } },
+        }),
     });
 
     b.installArtifact(exe);
@@ -52,9 +52,7 @@ pub fn build(b: *std.Build) void {
 
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    if (b.args) |args| run_cmd.addArgs(args);
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -66,7 +64,7 @@ pub fn build(b: *std.Build) void {
     const run_narser_unit_tests = b.addRunArtifact(narser_unit_tests);
 
     const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
+        .root_module = exe.root_module,
     });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
