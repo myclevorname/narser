@@ -11,11 +11,9 @@ See also [narz](https://github.com/water-sucks/narz), a more featureful alternat
 
 Narser simultaneously targets the 0.15.0 nightly and 0.14.1.
 
-If you want to run the tests, first run `mkdir src/tests/empty`. TODO: Make it create an empty directory instead
-
 ## TODO
 
 1. Clean up code
-2. Make `unpack` and `cat`
+2. Finish `unpack`
 3. Make a C interface if possible
 4. Revamp CLI

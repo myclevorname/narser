@@ -543,6 +543,8 @@ test "nar from dir-and-files" {
 test "empty directory" {
     const allocator = std.testing.allocator;
 
+    std.fs.cwd().makeDir(tests_path ++ "/empty") catch {};
+
     var root = try std.fs.cwd().openDir(tests_path ++ "/empty", .{ .iterate = true });
     defer root.close();
 
