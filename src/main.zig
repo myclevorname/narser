@@ -147,9 +147,9 @@ pub fn main() !void {
             if (rest.len != 0) symlinks.appendAssumeCapacity(rest);
 
             if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
-            if (first.len == 0) fatal("narser does not support following symbolic links to the filesystem", .{});
             if (std.mem.eql(u8, first, "..")) {
-                if (cur.parent.?.name) |_| cur = cur.parent.?;
+                if (cur.parent) |parent| cur = parent;
+                continue;
             }
 
             cur = if (cur.data == .directory)
@@ -167,6 +167,8 @@ pub fn main() !void {
                 .directory => {},
                 .file => return error.IsFile,
                 .symlink => |target| {
+                    if (std.mem.startsWith(u8, target, "/"))
+                        fatal("narser does not support following symbolic links to the filesystem", .{});
                     try symlinks.append(target);
                     cur = cur.parent.?;
                 },
