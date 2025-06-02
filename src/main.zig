@@ -180,5 +180,38 @@ pub fn main() !void {
             .symlink => unreachable,
             .directory => fatal("Expected file, found directory", .{}),
         }
+    } else if (std.mem.eql(u8, "unpack", command)) {
+        var archive_path = args.next() orelse "-";
+        if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
+
+        const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
+        defer allocator.free(contents);
+
+        var archive = try narser.NarArchive.fromSlice(allocator, contents);
+        defer archive.deinit();
+
+        const target_path = args.next() orelse ".";
+
+        switch (archive.root.data) {
+            .directory => @panic("TODO: Add directory unpacking"),
+            .file => |metadata| {
+                try std.fs.cwd().writeFile(.{
+                    .sub_path = target_path,
+                    .data = metadata.contents,
+                });
+                var file = try std.fs.cwd().openFile(target_path, .{});
+                defer file.close();
+
+                const stat = try file.stat();
+                try file.chmod((stat.mode & 0o7666) |
+                    @as(std.posix.mode_t, if (metadata.is_executable) 0o111 else 0o000)); // --x--x--x
+            },
+            .symlink => |target| {
+                std.fs.cwd().deleteFile(target_path) catch {};
+                try std.fs.cwd().symLink(target, target_path, .{});
+            },
+        }
+
+
     } else fatal("Invalid command '{s}'", .{command});
 }
