@@ -73,40 +73,40 @@ pub fn main() !void {
         var argument = args.next() orelse "-";
         if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
         var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
-            var archive = try narser.NarArchive.fromSymlink(allocator, target);
-            defer archive.deinit();
 
-            try archive.dump(writer);
-        } else |_| {
-            const stat = try std.fs.cwd().statFile(argument);
-            switch (stat.kind) {
-                .sym_link => unreachable,
-                .directory => {
-                    var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
-                    defer dir.close();
-                    var archive = try narser.NarArchive.fromDirectory(allocator, dir);
-                    defer archive.deinit();
+        var archive: narser.NarArchive =
+            if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target|
+                try narser.NarArchive.fromSymlink(allocator, target)
+            else |_| blk: {
+                const stat = try std.fs.cwd().statFile(argument);
+                switch (stat.kind) {
+                    .sym_link => fatal("Failed to read the symlink target", .{}),
+                    .directory => {
+                        var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
+                        defer dir.close();
+                        break :blk try narser.NarArchive.fromDirectory(allocator, dir);
+                    },
+                    else => {
+                        const contents = try std.fs.cwd().readFileAlloc(
+                            allocator,
+                            argument,
+                            std.math.maxInt(usize),
+                        );
+                        defer allocator.free(contents);
 
-                    try archive.dump(writer);
-                },
-                else => {
-                    const contents = try std.fs.cwd().readFileAlloc(allocator, argument, std.math.maxInt(usize));
-                    defer allocator.free(contents);
-
-                    var archive = try narser.NarArchive.fromFileContents(
-                        allocator,
-                        contents,
-                        stat.mode & 1 == 1,
-                    );
-                    defer archive.deinit();
-
-                    try archive.dump(writer);
-                },
-            }
-        }
+                        break :blk try narser.NarArchive.fromFileContents(
+                            allocator,
+                            contents,
+                            stat.mode & 1 == 1,
+                        );
+                    },
+                }
+            };
+        defer archive.deinit();
+        try archive.dump(writer);
     } else if (std.mem.eql(u8, "ls", command)) {
-        const argument = args.next() orelse "-";
+        var argument = args.next() orelse "-";
+        if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
         const contents = try std.fs.cwd().readFileAlloc(
             allocator,
             argument,
@@ -164,16 +164,16 @@ pub fn main() !void {
                 }
                 cur = cur.next orelse return error.FileNotFound;
             }
-            if (symlinks.len != 0) switch (cur.data) {
+            switch (cur.data) {
                 .directory => {},
-                .file => return error.IsFile,
+                .file => if (symlinks.len != 0) return error.IsFile,
                 .symlink => |target| {
                     if (std.mem.startsWith(u8, target, "/"))
                         fatal("narser does not support following symbolic links to the filesystem", .{});
                     try symlinks.append(target);
                     cur = cur.parent.?;
                 },
-            };
+            }
         }
 
         switch (cur.data) {
