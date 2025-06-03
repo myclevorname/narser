@@ -72,38 +72,38 @@ pub fn main() !void {
     if (std.mem.eql(u8, "pack", command)) {
         var argument = args.next() orelse "-";
         if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
-        const stat = try std.fs.cwd().statFile(argument);
-        switch (stat.kind) {
-            .sym_link => {
-                var buffer: [std.fs.max_path_bytes]u8 = undefined;
-                const target = try std.fs.cwd().readLink(argument, &buffer);
+        var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
+            var archive = try narser.NarArchive.fromSymlink(allocator, target);
+            defer archive.deinit();
 
-                var archive = try narser.NarArchive.fromSymlink(allocator, target);
-                defer archive.deinit();
+            try archive.dump(writer);
+        } else |_| {
+            const stat = try std.fs.cwd().statFile(argument);
+            switch (stat.kind) {
+                .sym_link => unreachable,
+                .directory => {
+                    var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
+                    defer dir.close();
+                    var archive = try narser.NarArchive.fromDirectory(allocator, dir);
+                    defer archive.deinit();
 
-                try archive.dump(writer);
-            },
-            .directory => {
-                var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
-                defer dir.close();
-                var archive = try narser.NarArchive.fromDirectory(allocator, dir);
-                defer archive.deinit();
+                    try archive.dump(writer);
+                },
+                else => {
+                    const contents = try std.fs.cwd().readFileAlloc(allocator, argument, std.math.maxInt(usize));
+                    defer allocator.free(contents);
 
-                try archive.dump(writer);
-            },
-            else => {
-                const contents = try std.fs.cwd().readFileAlloc(allocator, argument, std.math.maxInt(usize));
-                defer allocator.free(contents);
+                    var archive = try narser.NarArchive.fromFileContents(
+                        allocator,
+                        contents,
+                        stat.mode & 1 == 1,
+                    );
+                    defer archive.deinit();
 
-                var archive = try narser.NarArchive.fromFileContents(
-                    allocator,
-                    contents,
-                    stat.mode & 1 == 1,
-                );
-                defer archive.deinit();
-
-                try archive.dump(writer);
-            },
+                    try archive.dump(writer);
+                },
+            }
         }
     } else if (std.mem.eql(u8, "ls", command)) {
         const argument = args.next() orelse "-";
@@ -143,7 +143,7 @@ pub fn main() !void {
         while (symlinks.pop()) |full_first_path| {
             const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
             const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
-            const rest = if (first_part_len) |len| full_first_path[len+1..] else "";
+            const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
             if (rest.len != 0) symlinks.appendAssumeCapacity(rest);
 
             if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
@@ -154,7 +154,8 @@ pub fn main() !void {
 
             cur = if (cur.data == .directory)
                 cur.data.directory orelse return error.FileNotFound
-            else @panic(cur.name.?);
+            else
+                @panic(cur.name.?);
             find: while (true) {
                 switch (std.mem.order(u8, cur.name.?, first)) {
                     .lt => {},
@@ -211,7 +212,5 @@ pub fn main() !void {
                 try std.fs.cwd().symLink(target, target_path, .{});
             },
         }
-
-
     } else fatal("Invalid command '{s}'", .{command});
 }
