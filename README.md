@@ -14,6 +14,5 @@ Narser simultaneously targets the 0.15.0 nightly and 0.14.1.
 ## TODO
 
 1. Clean up code
-2. Finish `unpack`
-3. Make a C interface if possible
-4. Revamp CLI
+2. ~~Make a C interface if possible~~ I'm not so sure about doing this one.
+3. Revamp CLI

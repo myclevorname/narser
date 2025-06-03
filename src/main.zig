@@ -193,20 +193,62 @@ pub fn main() !void {
 
         const target_path = args.next() orelse ".";
 
-        switch (archive.root.data) {
-            .directory => @panic("TODO: Add directory unpacking"),
-            .file => |metadata| {
-                try std.fs.cwd().writeFile(.{
-                    .sub_path = target_path,
-                    .data = metadata.contents,
-                });
-                var file = try std.fs.cwd().openFile(target_path, .{});
-                defer file.close();
+        blk: switch (archive.root.data) {
+            .directory => {
+                var items: std.BoundedArray(std.fs.Dir, 256) = .{};
+                defer while (items.pop()) |dir| {
+                    var d = dir;
+                    d.close();
+                };
+                const target_dir = try std.fs.cwd().makeOpenPath(target_path, .{});
+                if (archive.root.data.directory != null) items.appendAssumeCapacity(target_dir);
 
-                const stat = try file.stat();
-                try file.chmod((stat.mode & 0o7666) |
-                    @as(std.posix.mode_t, if (metadata.is_executable) 0o111 else 0o000)); // --x--x--x
+                var current_node = archive.root.data.directory.?;
+
+                const lastItem = struct {
+                    fn f(array: anytype) ?@TypeOf(array.buffer[0]) {
+                        const slice =  array.slice();
+                        return if (slice.len == 0) null else slice[slice.len - 1];
+                    }
+                }.f;
+
+                while (lastItem(items)) |cwd| {
+                    switch (current_node.data) {
+                        .file => |metadata| {
+                            try cwd.writeFile(.{
+                                .sub_path = current_node.name.?,
+                                .data = metadata.contents,
+                                .flags = .{.mode = if (metadata.is_executable) 0o777 else 0o666},
+                            });
+                        },
+                        .symlink => |target| {
+                            cwd.deleteFile(current_node.name.?) catch {};
+                            try cwd.symLink(target, current_node.name.?, .{});
+                        },
+                        .directory => |child| {
+                            try cwd.makeDir(current_node.name.?);
+                            if (child) |node| {
+                                try items.ensureUnusedCapacity(1);
+                                const next = try cwd.openDir(current_node.name.?, .{});
+                                items.appendAssumeCapacity(next);
+                                current_node = node;
+                                continue;
+                            }
+                        },
+                    }
+                    while (current_node.next == null) {
+                        current_node = current_node.parent orelse break :blk;
+                        var dir = items.pop().?;
+                        dir.close();
+                    }
+                    current_node = current_node.next.?;
+                }
             },
+            .file => |metadata| try std.fs.cwd().writeFile(.{
+                .sub_path = target_path,
+                .data = metadata.contents,
+                .flags = .{.mode = if (metadata.is_executable) 0o777 else 0o666},
+            }),
             .symlink => |target| {
                 std.fs.cwd().deleteFile(target_path) catch {};
                 try std.fs.cwd().symLink(target, target_path, .{});
