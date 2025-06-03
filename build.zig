@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .strip = strip,
-            .imports = &.{ .{ .name = "narser", .module = narser } },
+            .imports = &.{.{ .name = "narser", .module = narser }},
         }),
     });
 
