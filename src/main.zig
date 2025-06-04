@@ -207,7 +207,7 @@ pub fn main() !void {
 
                 const lastItem = struct {
                     fn f(array: anytype) ?@TypeOf(array.buffer[0]) {
-                        const slice =  array.slice();
+                        const slice = array.slice();
                         return if (slice.len == 0) null else slice[slice.len - 1];
                     }
                 }.f;
@@ -218,7 +218,7 @@ pub fn main() !void {
                             try cwd.writeFile(.{
                                 .sub_path = current_node.name.?,
                                 .data = metadata.contents,
-                                .flags = .{.mode = if (metadata.is_executable) 0o777 else 0o666},
+                                .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
                             });
                         },
                         .symlink => |target| {
@@ -226,6 +226,11 @@ pub fn main() !void {
                             try cwd.symLink(target, current_node.name.?, .{});
                         },
                         .directory => |child| {
+                            if (std.mem.eql(u8, current_node.name.?, "..") or
+                                std.mem.containsAtLeastScalar(u8, current_node.name.?, 1, '/'))
+                                fatal("Archive contains a malicious directory entry name.", .{});
+                            if (std.mem.eql(u8, ".", current_node.name.?))
+                                fatal("Archive contains a directory entry whose name is \".\", assuming malformed archive", .{});
                             try cwd.makeDir(current_node.name.?);
                             if (child) |node| {
                                 try items.ensureUnusedCapacity(1);
@@ -247,7 +252,7 @@ pub fn main() !void {
             .file => |metadata| try std.fs.cwd().writeFile(.{
                 .sub_path = target_path,
                 .data = metadata.contents,
-                .flags = .{.mode = if (metadata.is_executable) 0o777 else 0o666},
+                .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
             }),
             .symlink => |target| {
                 std.fs.cwd().deleteFile(target_path) catch {};
