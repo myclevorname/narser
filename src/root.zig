@@ -46,7 +46,7 @@ pub const NarArchive = struct {
         var to_parse = slice;
         if (!matchAndSlide(&to_parse, "nix-archive-1")) return error.InvalidFormat;
 
-        var recursion_depth: usize = 0;
+        var recursion_depth: u64 = 0;
         var prev: ?*Object = null;
         var parent: ?*Object = null;
 
@@ -205,7 +205,7 @@ pub const NarArchive = struct {
                             self.arena.allocator(),
                             e.name,
                             std.math.maxInt(usize),
-                            stat.size,
+                            std.math.cast(usize, stat.size) orelse std.math.maxInt(usize),
                             alignOf(u8).?,
                             null,
                         );
@@ -418,8 +418,9 @@ fn expectNoMatch(slice: *[]u8, comptime match: []const u8) !void {
 fn unstr(slice: *[]u8) EncodeError![]u8 {
     if (slice.len < 8) return error.InvalidFormat;
 
-    const len = mem.readInt(u64, slice.*[0..8], .little);
-    const padded_len = (divCeil(u64, len, 8) catch unreachable) * 8;
+    const len = std.math.cast(usize, mem.readInt(u64, slice.*[0..8], .little))
+        orelse return error.OutOfMemory;
+    const padded_len = (divCeil(usize, len, 8) catch unreachable) * 8;
 
     if (slice.*[8..].len < padded_len) return error.InvalidFormat;
 
