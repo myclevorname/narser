@@ -11,6 +11,7 @@
           name = "narser";
           src = self;
           nativeBuildInputs = with pkgs; [ zig.hook ];
+          zigBuildFlags = "-Dstrip";
         });
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [ zig ];
