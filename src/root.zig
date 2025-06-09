@@ -521,7 +521,7 @@ test "nar from dir-and-files" {
     defer data.deinit();
 
     const dir = data.root.data.directory.?;
-    //try expectEqualStrings("dir", dir.name.?);
+    try expectEqualStrings("dir", dir.name.?);
 
     const file1 = dir.next.?;
     try expectEqual(null, file1.next);
