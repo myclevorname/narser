@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const use_llvm = b.option(bool, "use-llvm", "Use the LLVM backend");
     const strip = b.option(bool, "strip", "Remove debugging symbols");
 
     if (target.result.os.tag == .windows)
@@ -37,7 +38,8 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "narser",
-        .root_module = b.createModule(.{
+        .use_llvm = use_llvm,
+        .root_module = b.addModule("exe", .{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,

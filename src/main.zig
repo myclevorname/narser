@@ -49,7 +49,8 @@ fn printPath(node: *narser.Object, writer: anytype) !void {
 }
 
 pub fn main() !void {
-    var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
+    const stdout = std.io.getStdOut();
+    var bw = std.io.bufferedWriter(stdout.writer());
     defer bw.flush() catch @panic("Failed to fully flush stdout buffer");
 
     const writer = bw.writer();
@@ -104,6 +105,11 @@ pub fn main() !void {
             };
         defer archive.deinit();
         try archive.dump(writer);
+    } else if (std.mem.eql(u8, "dir", command)) {
+        const argument = args.next() orelse ".";
+
+        const dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
+        try narser.dumpDirectory(allocator, dir, stdout);
     } else if (std.mem.eql(u8, "ls", command)) {
         var argument = args.next() orelse "-";
         if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
