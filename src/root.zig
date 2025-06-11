@@ -418,8 +418,7 @@ fn expectNoMatch(slice: *[]u8, comptime match: []const u8) !void {
 fn unstr(slice: *[]u8) EncodeError![]u8 {
     if (slice.len < 8) return error.InvalidFormat;
 
-    const len = std.math.cast(usize, mem.readInt(u64, slice.*[0..8], .little))
-        orelse return error.OutOfMemory;
+    const len = std.math.cast(usize, mem.readInt(u64, slice.*[0..8], .little)) orelse return error.OutOfMemory;
     const padded_len = (divCeil(usize, len, 8) catch unreachable) * 8;
 
     if (slice.*[8..].len < padded_len) return error.InvalidFormat;
