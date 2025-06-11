@@ -359,6 +359,184 @@ pub const NarArchive = struct {
     }
 };
 
+pub fn dumpDirectory(
+    allocator: std.mem.Allocator,
+    root_dir: std.fs.Dir,
+    stdout: std.fs.File,
+) !void {
+    const NamedObject = struct {
+        name: [std.fs.max_path_bytes]u8 = undefined,
+        object: Object,
+    };
+
+    const ObjectIterator = struct {
+        current: ?*Object = null,
+
+        const Self = @This();
+
+        fn next(self: *Self) ?*Object {
+            if (self.current) |cur| {
+                self.current = cur.next;
+                return cur;
+            } else return null;
+        }
+    };
+
+    var bw: std.io.BufferedWriter(4096 * 8, @TypeOf(stdout.writer())) = .{ .unbuffered_writer = stdout.writer() };
+    defer bw.flush() catch @panic("Failed to flush stdout buffer");
+
+    const writer = bw.writer();
+
+    try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++ str("type") ++ str("directory"));
+
+    var iterators: std.BoundedArray(struct {
+        dir_iter: std.fs.Dir.Iterator,
+        object: *NamedObject,
+        object_iter: ObjectIterator = .{},
+    }, 4096) = .{};
+    defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
+
+    var objects = std.heap.MemoryPool(NamedObject).init(allocator);
+    defer objects.deinit();
+
+    const root_object = try objects.create();
+
+    root_object.object = .{
+        .parent = null,
+        .name = null,
+        .data = .{ .directory = null },
+    };
+
+    iterators.appendAssumeCapacity(.{
+        .dir_iter = root_dir.iterate(),
+        .object = root_object,
+    });
+
+    next_dir: while (true) {
+        var cur = &iterators.buffer[iterators.len - 1];
+
+        if (cur.object_iter.current == null) while (try cur.dir_iter.next()) |entry| {
+            const next_object = try objects.create();
+
+            @memcpy(next_object.name[0..entry.name.len], entry.name);
+            next_object.object = .{
+                .parent = &cur.object.object,
+                .name = next_object.name[0..entry.name.len],
+                .data = switch (entry.kind) {
+                    .directory => .{ .directory = null },
+                    .sym_link => .{ .symlink = undefined },
+                    else => .{ .file = undefined },
+                },
+            };
+
+            // copy+paste from NarArchive.fromDirectory
+            const next = &next_object.object;
+            if (cur.object.object.data.directory) |first|
+                switch (mem.order(u8, first.name.?, next.name.?)) {
+                    .lt => {
+                        var left = first;
+                        while (left.next != null and mem.order(u8, left.name.?, next.name.?) == .lt) {
+                            left = left.next.?;
+                        } else switch (mem.order(u8, left.name.?, next.name.?)) {
+                            .eq => {
+                                @branchHint(.cold);
+                                return error.Unexpected;
+                            },
+                            .lt => {
+                                left.next = next;
+                                next.prev = left;
+                            },
+                            .gt => {
+                                next.prev = left.prev;
+                                next.next = left;
+                                if (left.prev) |p| p.next = next;
+                                left.prev = next;
+                            },
+                        }
+                    },
+                    .eq => return error.Unexpected,
+                    .gt => {
+                        first.prev = next;
+                        next.next = first;
+                        cur.object.object.data.directory = next;
+                    },
+                }
+            else
+                cur.object.object.data.directory = next;
+        
+            cur.object_iter.current = cur.object.object.data.directory;
+        };
+
+        while (cur.object_iter.next()) |object| {
+            try writer.writeAll(comptime str("entry") ++ str("(") ++ str("name"));
+            try strWriter(object.name.?, writer);
+            try writer.writeAll(comptime str("node") ++ str("(") ++ str("type"));
+
+            switch (object.data) {
+                .directory => {
+                    try writer.writeAll(comptime str("directory"));
+                    try iterators.ensureUnusedCapacity(1);
+                    const next_dir = try cur.dir_iter.dir.openDir(object.name.?, .{ .iterate = true });
+
+                    const next = iterators.addOneAssumeCapacity();
+                    next.* = .{
+                        .object = @fieldParentPtr("object", object),
+                        .dir_iter = next_dir.iterateAssumeFirstIteration(),
+                    };
+                    continue :next_dir;
+                },
+                .file => {
+                    const stat = try cur.dir_iter.dir.statFile(object.name.?);
+                    try writer.writeAll(comptime str("regular"));
+                    if (stat.mode & 0o111 != 0) try writer.writeAll(comptime str("executable") ++ str(""));
+                    try writer.writeAll(comptime str("contents"));
+
+                    try writer.writeInt(u64, stat.size, .little);
+                    var left = stat.size;
+
+                    var file = try cur.dir_iter.dir.openFile(object.name.?, .{});
+                    defer file.close();
+
+                    while (left != 0) {
+                        var buf: [4096 * 8]u8 = undefined;
+                        const read = try file.read(&buf);
+                        try writer.writeAll(buf[0..read]);
+                        left -= read;
+                    }
+
+                    const zeroes: [8]u8 = .{0} ** 8;
+                    if (stat.size % 8 != 0) try writer.writeAll(zeroes[0 .. (8 - stat.size % 8) % 8]);
+
+                    try writer.writeAll(comptime str(")") ++ str(")"));
+                    objects.destroy(@fieldParentPtr("object", object));
+                },
+                .symlink => {
+                    var buf: [std.fs.max_path_bytes]u8 = undefined;
+                    try writer.writeAll(comptime str("symlink") ++ str("target"));
+
+                    const link = try cur.dir_iter.dir.readLink(object.name.?, &buf);
+
+                    try strWriter(link, writer);
+
+                    try writer.writeAll(comptime str(")") ++ str(")"));
+                    objects.destroy(@fieldParentPtr("object", object));
+                },
+            }
+        } else while (cur.object_iter.current == null) {
+            if (cur.object.object.parent == null) break :next_dir;
+            try writer.writeAll(comptime str(")") ++ str(")"));
+            cur.dir_iter.dir.close();
+
+            objects.destroy(cur.object);
+
+            _ = iterators.pop().?;
+
+            cur = &iterators.buffer[iterators.len - 1];
+        }
+    }
+    try writer.writeAll(comptime str(")"));
+}
+
 pub const Object = struct {
     parent: ?*Object,
     prev: ?*Object = null,

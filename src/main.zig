@@ -49,7 +49,8 @@ fn printPath(node: *narser.Object, writer: anytype) !void {
 }
 
 pub fn main() !void {
-    var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
+    const stdout = std.io.getStdOut();
+    var bw = std.io.bufferedWriter(stdout.writer());
     defer bw.flush() catch @panic("Failed to fully flush stdout buffer");
 
     const writer = bw.writer();
@@ -99,7 +100,8 @@ pub fn main() !void {
                         .directory => {
                             var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
                             defer dir.close();
-                            break :blk try narser.NarArchive.fromDirectory(allocator, dir);
+                            try narser.dumpDirectory(allocator, dir, stdout);
+                            return;
                         },
                         else => {
                             const contents = try std.fs.cwd().readFileAlloc(
@@ -112,7 +114,7 @@ pub fn main() !void {
                             break :blk try narser.NarArchive.fromFileContents(
                                 allocator,
                                 contents,
-                                stat.mode & 1 == 1,
+                                stat.mode & 0o111 != 0,
                             );
                         },
                     }
