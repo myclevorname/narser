@@ -100,7 +100,7 @@ pub fn main() !void {
                         .directory => {
                             var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
                             defer dir.close();
-                            try narser.dumpDirectory(allocator, dir, stdout);
+                            try narser.dumpDirectory(allocator, dir, writer);
                             return;
                         },
                         else => {

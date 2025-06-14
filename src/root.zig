@@ -362,7 +362,7 @@ pub const NarArchive = struct {
 pub fn dumpDirectory(
     allocator: std.mem.Allocator,
     root_dir: std.fs.Dir,
-    stdout: std.fs.File,
+    writer: anytype,
 ) !void {
     const NamedObject = struct {
         name: [std.fs.max_path_bytes]u8 = undefined,
@@ -382,18 +382,15 @@ pub fn dumpDirectory(
         }
     };
 
-    var bw: std.io.BufferedWriter(4096 * 8, @TypeOf(stdout.writer())) = .{ .unbuffered_writer = stdout.writer() };
-    defer bw.flush() catch @panic("Failed to flush stdout buffer");
-
-    const writer = bw.writer();
-
     try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++ str("type") ++ str("directory"));
 
-    var iterators: std.BoundedArray(struct {
+    var iterators = try allocator.create(std.BoundedArray(struct {
         dir_iter: std.fs.Dir.Iterator,
         object: *NamedObject,
         object_iter: ObjectIterator = .{},
-    }, 4096) = .{};
+    }, 4096));
+    iterators.* = .{};
+    defer allocator.destroy(iterators);
     defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
 
     var objects = std.heap.MemoryPool(NamedObject).init(allocator);
