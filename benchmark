@@ -1,47 +1,65 @@
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ zig build -Doptimize=ReleaseFast -Dstrip -p /tmp/clevor/old
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ git switch master 
-Previous HEAD position was 853a783 Add strip option, buffer writes
-Switched to branch 'master'
-Your branch is ahead of 'public/master' by 1 commit.
-  (use "git push" to publish your local commits)
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ zig build -Doptimize=ReleaseFast -Dstrip -p /tmp/clevor/new
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ cd
-[clevor@clevor-laptop-nixos:~]$ cd /tmp/clevor/
-[clevor@clevor-laptop-nixos:/tmp/clevor]$ git clone --depth=1 https://github.com/torvalds/linux
+[nix-shell:~/Code/zig/narser]$ nix build nixpkgs#nixVersions.latest -o nix
+
+[nix-shell:~/Code/zig/narser]$ rm nix
+
+[nix-shell:~/Code/zig/narser]$ nix build nixpkgs#nixVersions.latest -o nix --print-out-paths 
+/nix/store/90s45p0f4wh1k3s4ka74czsnx7cb4030-nix-2.28.3-man
+/nix/store/0g0h3gbbybal9l6nkyr9r8pz0hngkmda-nix-2.28.3
+
+[nix-shell:~/Code/zig/narser]$ rm nix-man
+
+[nix-shell:~/Code/zig/narser]$ nix build . -o package --print-out-paths 
+/nix/store/qj40mfsrnc67cachhx5fip6bg12sv1xi-narser
+
+[nix-shell:~/Code/zig/narser]$ rm -rf linux
+
+[nix-shell:~/Code/zig/narser]$ git clone --depth=1 https://github.com/torvalds/linux
 Cloning into 'linux'...
-remote: Enumerating objects: 94678, done.
-remote: Counting objects: 100% (94678/94678), done.
-remote: Compressing objects: 100% (84552/84552), done.
-remote: Total 94678 (delta 9777), reused 77207 (delta 9121), pack-reused 0 (from 0)
-Receiving objects: 100% (94678/94678), 263.49 MiB | 20.43 MiB/s, done.
-Resolving deltas: 100% (9777/9777), done.
-Updating files: 100% (89382/89382), done.
-[clevor@clevor-laptop-nixos:/tmp/clevor]$ nix --version
-nix (Nix) 2.28.3
-[clevor@clevor-laptop-nixos:/tmp/clevor]$ nix-shell -p bench
+remote: Enumerating objects: 95065, done.
+remote: Counting objects: 100% (95065/95065), done.
+remote: Compressing objects: 100% (84951/84951), done.
+remote: Total 95065 (delta 9915), reused 74967 (delta 9107), pack-reused 0 (from 0)
+Receiving objects: 100% (95065/95065), 264.45 MiB | 19.51 MiB/s, done.
+Resolving deltas: 100% (9915/9915), done.
+Updating files: 100% (89748/89748), done.
 
-[nix-shell:/tmp/clevor]$ diff <(nix nar pack linux) <(./old/bin/narser pack linux)
+[nix-shell:~/Code/zig/narser]$ zig build -Doptimize=ReleaseFast -Dstrip -p release-fast
 
-[nix-shell:/tmp/clevor]$ diff <(nix nar pack linux) <(./new/bin/narser pack linux)
+[nix-shell:~/Code/zig/narser]$ git log HEAD~1..
+commit ef0d3cb42437552a01c352ca54a42c91a6fcda28 (HEAD -> master)
+Author: Sam Connelly <myclevorname@gmail.com>
+Date:   Tue Jun 10 21:20:27 2025 -0400
 
-[nix-shell:/tmp/clevor]$ bench "nix nar pack linux" "./old/bin/narser pack linux" "./new/bin/narser pack linux"
-benchmarking bench/nix nar pack linux
-time                 2.121 s    (2.106 s .. 2.143 s)
+    Add memory-efficient directory unpacking command
+
+[nix-shell:~/Code/zig/narser]$ bench "./release-fast/bin/narser pack linux" "./nix/bin/nix nar pack linux" "./package/bin/narser pack linux"
+benchmarking bench/./release-fast/bin/narser pack linux
+time                 852.0 ms   (834.4 ms .. 883.1 ms)
                      1.000 R²   (1.000 R² .. 1.000 R²)
-mean                 2.108 s    (2.103 s .. 2.114 s)
-std dev              6.369 ms   (1.831 ms .. 8.329 ms)
+mean                 858.9 ms   (851.9 ms .. 867.2 ms)
+std dev              8.534 ms   (3.964 ms .. 11.92 ms)
 variance introduced by outliers: 19% (moderately inflated)
 
-benchmarking bench/./old/bin/narser pack linux
-time                 1.849 s    (1.839 s .. 1.854 s)
+benchmarking bench/./nix/bin/nix nar pack linux
+time                 2.448 s    (2.383 s .. 2.504 s)
                      1.000 R²   (1.000 R² .. 1.000 R²)
-mean                 1.850 s    (1.847 s .. 1.853 s)
-std dev              3.139 ms   (1.386 ms .. 4.356 ms)
+mean                 2.440 s    (2.423 s .. 2.454 s)
+std dev              17.89 ms   (8.171 ms .. 24.54 ms)
 variance introduced by outliers: 19% (moderately inflated)
 
-benchmarking bench/./new/bin/narser pack linux
-time                 1.781 s    (1.767 s .. 1.790 s)
+benchmarking bench/./package/bin/narser pack linux
+time                 1.069 s    (1.066 s .. 1.072 s)
                      1.000 R²   (1.000 R² .. 1.000 R²)
-mean                 1.779 s    (1.774 s .. 1.781 s)
-std dev              3.284 ms   (992.5 μs .. 4.376 ms)
+mean                 1.070 s    (1.069 s .. 1.071 s)
+std dev              1.063 ms   (364.4 μs .. 1.363 ms)
 variance introduced by outliers: 19% (moderately inflated)
+
+
+[nix-shell:~/Code/zig/narser]$ zig version
+0.15.0-dev.784+4a02e080d
+
+[nix-shell:~/Code/zig/narser]$ cmp <(./release-fast/bin/narser pack linux) <(./nix/bin/nix nar pack linux)
+
+[nix-shell:~/Code/zig/narser]$ cmp <(./package/bin/narser pack linux) <(./nix/bin/nix nar pack linux)
+
+[nix-shell:~/Code/zig/narser]$ 

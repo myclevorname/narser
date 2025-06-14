@@ -463,7 +463,7 @@ pub fn dumpDirectory(
                 }
             else
                 cur.object.object.data.directory = next;
-        
+
             cur.object_iter.current = cur.object.object.data.directory;
         };
 
