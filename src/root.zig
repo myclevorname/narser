@@ -388,7 +388,7 @@ pub fn dumpDirectory(
         dir_iter: std.fs.Dir.Iterator,
         object: *NamedObject,
         object_iter: ObjectIterator = .{},
-    }, 4096));
+    }, 2048)); // TODO: Change to 4096
     iterators.* = .{};
     defer allocator.destroy(iterators);
     defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
