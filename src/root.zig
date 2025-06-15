@@ -44,7 +44,7 @@ pub const NarArchive = struct {
         errdefer self.deinit();
 
         var to_parse = slice;
-        if (!matchAndSlide(&to_parse, "nix-archive-1")) return error.InvalidFormat;
+        expectMatch(&to_parse, "nix-archive-1") catch return error.NotANar;
 
         var recursion_depth: u64 = 0;
         var prev: ?*Object = null;
@@ -215,38 +215,7 @@ pub const NarArchive = struct {
                         };
                     },
                 }
-                if (cur.object.data.directory) |first|
-                    switch (mem.order(u8, first.name.?, next.name.?)) {
-                        .lt => {
-                            var left = first;
-                            while (left.next != null and mem.order(u8, left.name.?, next.name.?) == .lt) {
-                                left = left.next.?;
-                            } else switch (mem.order(u8, left.name.?, next.name.?)) {
-                                .eq => {
-                                    @branchHint(.cold);
-                                    return error.Unexpected;
-                                },
-                                .lt => {
-                                    left.next = next;
-                                    next.prev = left;
-                                },
-                                .gt => {
-                                    next.prev = left.prev;
-                                    next.next = left;
-                                    if (left.prev) |p| p.next = next;
-                                    left.prev = next;
-                                },
-                            }
-                        },
-                        .eq => return error.Unexpected,
-                        .gt => {
-                            first.prev = next;
-                            next.next = first;
-                            cur.object.data.directory = next;
-                        },
-                    }
-                else
-                    cur.object.data.directory = next;
+                try cur.object.insertChild(next);
             } else {
                 if (iters.len > 1) cur.iterator.dir.close();
                 _ = iters.pop().?;
@@ -426,40 +395,7 @@ pub fn dumpDirectory(
                 },
             };
 
-            // copy+paste from NarArchive.fromDirectory
-            const next = &next_object.object;
-            if (cur.object.object.data.directory) |first|
-                switch (mem.order(u8, first.name.?, next.name.?)) {
-                    .lt => {
-                        var left = first;
-                        while (left.next != null and mem.order(u8, left.name.?, next.name.?) == .lt) {
-                            left = left.next.?;
-                        } else switch (mem.order(u8, left.name.?, next.name.?)) {
-                            .eq => {
-                                @branchHint(.cold);
-                                return error.Unexpected;
-                            },
-                            .lt => {
-                                left.next = next;
-                                next.prev = left;
-                            },
-                            .gt => {
-                                next.prev = left.prev;
-                                next.next = left;
-                                if (left.prev) |p| p.next = next;
-                                left.prev = next;
-                            },
-                        }
-                    },
-                    .eq => return error.Unexpected,
-                    .gt => {
-                        first.prev = next;
-                        next.next = first;
-                        cur.object.object.data.directory = next;
-                    },
-                }
-            else
-                cur.object.object.data.directory = next;
+            try cur.object.object.insertChild(&next_object.object);
 
             cur.object_iter.current = cur.object.object.data.directory;
         };
@@ -546,6 +482,38 @@ pub const Object = struct {
         symlink: []u8,
         directory: ?*Object,
     };
+
+    pub fn insertChild(self: *Object, child: *Object) error{DuplicateObjectName}!void {
+        if (self.data.directory) |first|
+            switch (mem.order(u8, first.name.?, child.name.?)) {
+                .lt => {
+                    var left = first;
+                    while (left.next != null and mem.order(u8, left.name.?, child.name.?) == .lt) {
+                        left = left.next.?;
+                    } else switch (mem.order(u8, left.name.?, child.name.?)) {
+                        .eq => return error.DuplicateObjectName,
+                        .lt => {
+                            left.next = child;
+                            child.prev = left;
+                        },
+                        .gt => {
+                            child.prev = left.prev;
+                            child.next = left;
+                            if (left.prev) |p| p.next = child;
+                            left.prev = child;
+                        },
+                    }
+                },
+                .eq => return error.DuplicateObjectName,
+                .gt => {
+                    first.prev = child;
+                    child.next = first;
+                    self.data.directory = child;
+                },
+            }
+        else
+            self.data.directory = child;
+    }
 };
 
 pub const File = struct {
@@ -557,15 +525,16 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     InvalidFormat,
     WrongDirectoryOrder,
     DuplicateObjectName,
+    NotANar,
 };
 
 fn prevLevel(slice: *[]u8, depth: *u64) EncodeError!void {
-    if (!matchAndSlide(slice, ")")) return error.InvalidFormat;
+    try expectMatch(slice, ")");
     if (depth.* == 0) unreachable else depth.* -= 1;
 }
 
 fn nextLevel(slice: *[]u8, depth: *u64) EncodeError!void {
-    if (!matchAndSlide(slice, "(")) return error.InvalidFormat;
+    try expectMatch(slice, "(");
     depth.* += 1;
 }
 
