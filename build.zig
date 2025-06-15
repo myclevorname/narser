@@ -19,23 +19,6 @@ pub fn build(b: *std.Build) void {
     tests_path.addOptionPath("tests_path", b.path("src/tests"));
     narser.addImport("tests", tests_path.createModule());
 
-    const lib_mod = b.addModule("libnarser", .{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "narser",
-        .root_module = lib_mod,
-    });
-
-    const lib_install = b.addInstallArtifact(lib, .{});
-
-    const lib_step = b.step("lib", "Build the experimental C library");
-    lib_step.dependOn(&lib_install.step);
-
     const exe = b.addExecutable(.{
         .name = "narser",
         .use_llvm = use_llvm,
