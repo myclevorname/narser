@@ -14,5 +14,11 @@ Narser simultaneously targets the 0.15.0 nightly and 0.14.1.
 ## TODO
 
 1. Clean up code
-2. ~~Make a C interface if possible~~ I'm not so sure about doing this one.
-3. Revamp CLI
+2. Revamp CLI and the Zig interface
+3. Add documentation
+
+## Contributing
+
+Please read CONTRIBUTING.md for some guidelines and view some of my other repos for contact information.
+
+TL;DR: There is nothing to worry about if you [don't use AI](https://github.com/orgs/community/discussions/159749#discussioncomment-13464891) and you follow Github's ToS.
