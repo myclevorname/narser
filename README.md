@@ -1,7 +1,7 @@
 # Narser, a Nix ARchive parSER library and program
 
 Narser is a replacement for `nix nar` that aims to be simple and fast.
-Currently, `narser pack` is 18.5% faster than Nix at packing the Linux kernel source code. (see [benchmark](benchmark))
+Currently, `narser pack` is around twice as fast as Nix at packing the Linux kernel source code, at least when discarding the output or writing to a tmpfs. (see [benchmark](benchmark))
 
 NOTE: Not to be confused with the [Narser](https://github.com/Nacorpio/Narser) parser generator, which is 9 years old.
 
@@ -16,6 +16,7 @@ Narser simultaneously targets the 0.15.0 nightly and 0.14.1.
 1. Clean up code
 2. Revamp CLI and the Zig interface
 3. Add documentation
+4. Add more tests
 
 ## Contributing
 

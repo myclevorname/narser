@@ -344,22 +344,20 @@ pub fn dumpDirectory(
         const Self = @This();
 
         fn next(self: *Self) ?*Object {
-            if (self.current) |cur| {
-                self.current = cur.next;
-                return cur;
-            } else return null;
+            const ret = self.current;
+
+            if (ret) |cur| self.current = cur.next;
+            return ret;
         }
     };
 
     try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++ str("type") ++ str("directory"));
 
-    var iterators = try allocator.create(std.BoundedArray(struct {
+    var iterators: std.BoundedArray(struct {
         dir_iter: std.fs.Dir.Iterator,
         object: *NamedObject,
         object_iter: ObjectIterator = .{},
-    }, 2048)); // TODO: Change to 4096
-    iterators.* = .{};
-    defer allocator.destroy(iterators);
+    }, 512) = .{};
     defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
 
     var objects = std.heap.MemoryPool(NamedObject).init(allocator);
@@ -438,10 +436,7 @@ pub fn dumpDirectory(
                     }
 
                     const zeroes: [8]u8 = .{0} ** 8;
-                    if (stat.size % 8 != 0) try writer.writeAll(zeroes[0 .. (8 - stat.size % 8) % 8]);
-
-                    try writer.writeAll(comptime str(")") ++ str(")"));
-                    objects.destroy(@fieldParentPtr("object", object));
+                    try writer.writeAll(zeroes[0 .. (8 - stat.size % 8) % 8]);
                 },
                 .symlink => {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -450,23 +445,55 @@ pub fn dumpDirectory(
                     const link = try cur.dir_iter.dir.readLink(object.name.?, &buf);
 
                     try strWriter(link, writer);
-
-                    try writer.writeAll(comptime str(")") ++ str(")"));
-                    objects.destroy(@fieldParentPtr("object", object));
                 },
             }
+            try writer.writeAll(comptime str(")") ++ str(")"));
+            objects.destroy(@fieldParentPtr("object", object));
         } else while (cur.object_iter.current == null) {
             if (cur.object.object.parent == null) break :next_dir;
             try writer.writeAll(comptime str(")") ++ str(")"));
             cur.dir_iter.dir.close();
 
             objects.destroy(cur.object);
-
             _ = iterators.pop().?;
 
             cur = &iterators.buffer[iterators.len - 1];
         }
     }
+    try writer.writeAll(comptime str(")"));
+}
+
+pub fn dumpFile(file: std.fs.File, writer: anytype) !void {
+    const stat = try file.stat();
+    const is_executable = stat.mode & 0o111 != 0;
+    try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++ str("type") ++ str("regular"));
+    if (is_executable) try writer.writeAll(comptime str("executable") ++ str(""));
+    try writer.writeAll(comptime str("contents"));
+
+    try writer.writeInt(u64, stat.size, .little);
+
+    var left = stat.size;
+    var buf: [4096]u8 = undefined;
+
+    while (left != 0) {
+        const read = try file.read(&buf);
+        if (read == 0) return error.UnexpectedEof;
+        try writer.writeAll(buf[0..read]);
+        left -= read;
+    }
+
+    const zeroes: [8]u8 = .{0} ** 8;
+    try writer.writeAll(zeroes[0 .. (8 - stat.size % 8) % 8]);
+
+    try writer.writeAll(comptime str(")"));
+}
+
+pub fn dumpSymlink(target: []const u8, writer: anytype) !void {
+    try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++
+        str("type") ++
+        str("symlink") ++ str("target"));
+    try strWriter(target, writer);
+
     try writer.writeAll(comptime str(")"));
 }
 
@@ -578,7 +605,7 @@ fn unstr(slice: *[]u8) EncodeError![]u8 {
     return result;
 }
 
-fn strWriter(string: []u8, writer: anytype) !void {
+fn strWriter(string: []const u8, writer: anytype) !void {
     var buffer: [8]u8 = undefined;
     mem.writeInt(u64, &buffer, string.len, .little);
 
