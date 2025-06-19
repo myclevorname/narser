@@ -119,59 +119,23 @@ pub fn main() !void {
         var archive = try narser.NarArchive.fromSlice(allocator, contents);
         defer archive.deinit();
 
-        var cur = archive.root;
-
-        switch (cur.data) {
-            .directory => |child| if (child == null) fatal("Archive \"{s}\" is an empty directory", .{archive_path}),
+        switch (archive.root.data) {
+            .directory => |child| if (child == null) fatal("Archive is an empty directory", .{}),
             .file => {},
             .symlink => fatal("narser does not support following symbolic links to the filesystem", .{}),
         }
 
-        var symlinks: std.BoundedArray([]const u8, 4096) = .{};
+        const sub = archive.root.subPath(subpath) catch |e| switch (e) {
+            error.IsFile => fatal("In archive: expected directory, found file", .{}),
+            error.FileNotFound => fatal("In archive: file not found", .{}),
+            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            error.Overflow => fatal("Too many nested symlinks", .{}),
+        };
 
-        symlinks.appendAssumeCapacity(subpath);
-
-        comptime std.debug.assert(std.fs.path.sep == '/');
-        while (symlinks.pop()) |full_first_path| {
-            const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
-            const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
-            const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
-            if (rest.len != 0) symlinks.appendAssumeCapacity(rest);
-
-            if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
-            if (std.mem.eql(u8, first, "..")) {
-                if (cur.parent) |parent| cur = parent;
-                continue;
-            }
-
-            cur = if (cur.data == .directory)
-                cur.data.directory orelse return error.FileNotFound
-            else
-                @panic(cur.name.?);
-            find: while (true) {
-                switch (std.mem.order(u8, cur.name.?, first)) {
-                    .lt => {},
-                    .eq => break :find,
-                    .gt => return error.FileNotFound,
-                }
-                cur = cur.next orelse return error.FileNotFound;
-            }
-            switch (cur.data) {
-                .directory => {},
-                .file => if (symlinks.len != 0) return error.IsFile,
-                .symlink => |target| {
-                    if (std.mem.startsWith(u8, target, "/"))
-                        fatal("narser does not support following symbolic links to the filesystem", .{});
-                    try symlinks.append(target);
-                    cur = cur.parent.?;
-                },
-            }
-        }
-
-        switch (cur.data) {
+        switch (sub.data) {
             .file => |metadata| try writer.writeAll(metadata.contents),
             .symlink => unreachable,
-            .directory => fatal("Expected file, found directory", .{}),
+            .directory => fatal("In archive: expected file, found directory", .{}),
         }
     } else if (std.mem.eql(u8, "unpack", command)) {
         var archive_path = args.next() orelse "-";
@@ -183,73 +147,26 @@ pub fn main() !void {
         var archive = try narser.NarArchive.fromSlice(allocator, contents);
         defer archive.deinit();
 
-        const target_path = args.next() orelse ".";
+        const target_path = args.next();
 
-        blk: switch (archive.root.data) {
+        switch (archive.root.data) {
             .directory => {
-                var items: std.BoundedArray(std.fs.Dir, 256) = .{};
-                defer while (items.pop()) |dir| {
-                    var d = dir;
-                    d.close();
-                };
-                const target_dir = try std.fs.cwd().makeOpenPath(target_path, .{});
-                if (archive.root.data.directory != null) items.appendAssumeCapacity(target_dir);
-
-                var current_node = archive.root.data.directory.?;
-
-                const lastItem = struct {
-                    fn f(array: anytype) ?@TypeOf(array.buffer[0]) {
-                        const slice = array.slice();
-                        return if (slice.len == 0) null else slice[slice.len - 1];
-                    }
-                }.f;
-
-                while (lastItem(items)) |cwd| {
-                    switch (current_node.data) {
-                        .file => |metadata| {
-                            try cwd.writeFile(.{
-                                .sub_path = current_node.name.?,
-                                .data = metadata.contents,
-                                .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
-                            });
-                        },
-                        .symlink => |target| {
-                            cwd.deleteFile(current_node.name.?) catch {};
-                            try cwd.symLink(target, current_node.name.?, .{});
-                        },
-                        .directory => |child| {
-                            if (std.mem.eql(u8, current_node.name.?, "..") or
-                                std.mem.containsAtLeastScalar(u8, current_node.name.?, 1, '/'))
-                                fatal("Archive contains a malicious directory entry name.", .{});
-                            if (std.mem.eql(u8, ".", current_node.name.?))
-                                fatal("Archive contains a directory entry whose name is \".\", assuming malformed archive", .{});
-                            try cwd.makeDir(current_node.name.?);
-                            if (child) |node| {
-                                try items.ensureUnusedCapacity(1);
-                                const next = try cwd.openDir(current_node.name.?, .{});
-                                items.appendAssumeCapacity(next);
-                                current_node = node;
-                                continue;
-                            }
-                        },
-                    }
-                    while (current_node.next == null) {
-                        current_node = current_node.parent orelse break :blk;
-                        var dir = items.pop().?;
-                        dir.close();
-                    }
-                    current_node = current_node.next.?;
-                }
+                var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
+                defer dir.close();
+                try archive.unpackDir(dir);
             },
-            .file => |metadata| try std.fs.cwd().writeFile(.{
-                .sub_path = target_path,
-                .data = metadata.contents,
-                .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
-            }),
-            .symlink => |target| {
-                std.fs.cwd().deleteFile(target_path) catch {};
-                try std.fs.cwd().symLink(target, target_path, .{});
-            },
+            .file => |metadata| if (target_path == null or std.mem.eql(u8, "-", target_path.?))
+                try writer.writeAll(metadata.contents)
+            else
+                try std.fs.cwd().writeFile(.{
+                    .sub_path = target_path.?,
+                    .data = metadata.contents,
+                    .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
+                }),
+            .symlink => |target| if (target_path) |path|
+                try std.fs.cwd().symLink(target, path, .{})
+            else
+                fatal("Target path required", .{}),
         }
     } else fatal("Invalid command '{s}'", .{command});
 }

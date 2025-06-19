@@ -322,6 +322,58 @@ pub const NarArchive = struct {
         }
     }
 
+    pub fn unpackDir(self: *const NarArchive, target_dir: std.fs.Dir) !void {
+        var items: std.BoundedArray(std.fs.Dir, 256) = .{};
+        defer if (items.len > 1) for (items.slice()[1..]) |*dir| dir.close();
+        if (self.root.data.directory != null) items.appendAssumeCapacity(target_dir);
+
+        var current_node = self.root.data.directory.?;
+
+        const lastItem = struct {
+            fn f(array: anytype) ?@TypeOf(array.buffer[0]) {
+                const slice = array.slice();
+                return if (slice.len == 0) null else slice[slice.len - 1];
+            }
+        }.f;
+
+        while (lastItem(items)) |cwd| {
+            switch (current_node.data) {
+                .file => |metadata| {
+                    try cwd.writeFile(.{
+                        .sub_path = current_node.name.?,
+                        .data = metadata.contents,
+                        .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
+                    });
+                },
+                .symlink => |target| {
+                    cwd.deleteFile(current_node.name.?) catch {};
+                    try cwd.symLink(target, current_node.name.?, .{});
+                },
+                .directory => |child| {
+                    if (std.mem.eql(u8, current_node.name.?, "..") or
+                        std.mem.containsAtLeastScalar(u8, current_node.name.?, 1, '/'))
+                        return error.MaliciousArchive;
+                    if (std.mem.eql(u8, ".", current_node.name.?))
+                        return error.MaliciousArchive;
+                    try cwd.makeDir(current_node.name.?);
+                    if (child) |node| {
+                        try items.ensureUnusedCapacity(1);
+                        const next = try cwd.openDir(current_node.name.?, .{});
+                        items.appendAssumeCapacity(next);
+                        current_node = node;
+                        continue;
+                    }
+                },
+            }
+            while (current_node.next == null) {
+                current_node = current_node.parent orelse return;
+                var dir = items.pop().?;
+                if (current_node.parent != null) dir.close();
+            }
+            current_node = current_node.next.?;
+        }
+    }
+
     pub fn deinit(self: *NarArchive) void {
         self.arena.deinit();
         self.* = undefined;
@@ -357,7 +409,7 @@ pub fn dumpDirectory(
         dir_iter: std.fs.Dir.Iterator,
         object: *NamedObject,
         object_iter: ObjectIterator = .{},
-    }, 512) = .{};
+    }, 256) = .{};
     defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
 
     var objects = std.heap.MemoryPool(NamedObject).init(allocator);
@@ -540,6 +592,49 @@ pub const Object = struct {
             }
         else
             self.data.directory = child;
+    }
+
+    pub fn subPath(self: *const Object, subpath: []const u8) !*const Object {
+        var cur = self;
+        var parts: std.BoundedArray([]const u8, 4096) = .{};
+        parts.appendAssumeCapacity(subpath);
+
+        comptime std.debug.assert(std.fs.path.sep == '/');
+        while (parts.pop()) |full_first_path| {
+            const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
+            const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
+            const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
+            if (rest.len != 0) parts.appendAssumeCapacity(rest);
+
+            if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
+            if (std.mem.eql(u8, first, "..")) {
+                if (cur.parent) |parent| cur = parent;
+                continue;
+            }
+
+            cur = if (cur.data == .directory)
+                cur.data.directory orelse return error.FileNotFound
+            else
+                @panic(cur.name.?);
+            find: while (true) {
+                switch (std.mem.order(u8, cur.name.?, first)) {
+                    .lt => {},
+                    .eq => break :find,
+                    .gt => return error.FileNotFound,
+                }
+                cur = cur.next orelse return error.FileNotFound;
+            }
+            switch (cur.data) {
+                .directory => {},
+                .file => if (parts.len != 0) return error.IsFile,
+                .symlink => |target| {
+                    if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
+                    try parts.append(target);
+                    cur = cur.parent.?;
+                },
+            }
+        }
+        return cur;
     }
 };
 
