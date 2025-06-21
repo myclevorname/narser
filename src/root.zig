@@ -835,3 +835,44 @@ test "nar to directory to nar" {
 
     try std.testing.expectEqualSlices(u8, expected, stream.getWritten());
 }
+
+test "more complex" {
+    const allocator = std.testing.allocator;
+
+    std.fs.cwd().makeDir(tests_path ++ "/complex/empty") catch {};
+
+    var root = try std.fs.cwd().openDir(tests_path ++ "/complex", .{ .iterate = true });
+    defer root.close();
+
+    const expected = @embedFile("tests/complex.nar") ++ @embedFile("tests/complex.nar")
+        ++ @embedFile("tests/complex_empty.nar") ++ @embedFile("tests/complex_empty.nar");
+
+    var array: std.BoundedArray(u8, expected.len) = .{};
+    const writer = array.writer();
+
+    var cds = std.io.changeDetectionStream(expected, writer);
+    const cds_writer = cds.writer();
+
+    {
+        try dumpDirectory(allocator, root, cds_writer);
+
+        var archive = try NarArchive.fromDirectory(allocator, root);
+        defer archive.deinit();
+
+        try archive.dump(cds_writer);
+    }
+    {
+        var empty = try root.openDir("empty", .{ .iterate = true });
+        defer empty.close();
+
+        try dumpDirectory(allocator, empty, cds_writer);
+
+        var archive = try NarArchive.fromDirectory(allocator, empty);
+        defer archive.deinit();
+
+        try archive.dump(cds_writer);
+    }
+
+    // TODO: Add more dumps and froms
+    if (cds.changeDetected()) return error.NoMatch;
+}
