@@ -281,45 +281,42 @@ pub const NarArchive = struct {
     pub fn dump(self: *const NarArchive, writer: anytype) !void {
         var node = self.root;
 
-        try writer.writeAll(comptime str("nix-archive-1"));
+        try writeTokens(writer, &.{.magic});
 
-        while (true) {
+        loop: while (true) {
             if (node.parent != null) {
-                try writer.writeAll(comptime str("entry") ++ str("(") ++ str("name"));
+                try writeTokens(writer, &.{.directory_entry});
                 try strWriter(node.name.?, writer);
-                try writer.writeAll(comptime str("node"));
+                try writeTokens(writer, &.{.node});
             }
 
-            try writer.writeAll(comptime str("(") ++ str("type"));
+            try writeTokens(writer, &.{.l_paren});
             switch (node.data) {
                 .directory => |child| {
-                    try writer.writeAll(comptime str("directory"));
+                    try writeTokens(writer, &.{.directory});
                     if (child) |next| {
                         node = next;
                         continue;
                     }
                 },
                 .file => |data| {
-                    try writer.writeAll(comptime str("regular"));
-                    if (data.is_executable) try writer.writeAll(comptime str("executable") ++ str(""));
-                    try writer.writeAll(comptime str("contents"));
+                    try writeTokens(writer, &.{.file});
+                    if (data.is_executable) try writeTokens(writer, &.{.executable_file});
+                    try writeTokens(writer, &.{.file_contents});
                     try strWriter(data.contents, writer);
                 },
                 .symlink => |link| {
-                    try writer.writeAll(comptime str("symlink") ++ str("target"));
+                    try writeTokens(writer, &.{.symlink});
                     try strWriter(link, writer);
                 },
             }
-            try writer.writeAll(comptime str(")"));
-            if (node.parent != null) {
-                try writer.writeAll(comptime str(")"));
-            }
-            while (node.parent != null and node.next == null) {
-                try writer.writeAll(comptime str(")"));
-                node = node.parent.?;
-                if (node.parent != null) try writer.writeAll(comptime str(")"));
-            } else if (node.parent != null) node = node.next.? else return;
+            if (node.parent != null) try writeTokens(writer, &.{ .r_paren, .r_paren });
+            while (node.next == null) {
+                node = node.parent orelse break :loop;
+                if (node.parent != null) try writeTokens(writer, &.{ .r_paren, .r_paren });
+            } else node = node.next.?;
         }
+        try writeTokens(writer, &.{.r_paren});
     }
 
     pub fn unpackDir(self: *const NarArchive, target_dir: std.fs.Dir) !void {
@@ -403,7 +400,7 @@ pub fn dumpDirectory(
         }
     };
 
-    try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++ str("type") ++ str("directory"));
+    try writeTokens(writer, &.{ .magic, .l_paren, .directory });
 
     var iterators: std.BoundedArray(struct {
         dir_iter: std.fs.Dir.Iterator,
@@ -451,13 +448,13 @@ pub fn dumpDirectory(
         };
 
         while (cur.object_iter.next()) |object| {
-            try writer.writeAll(comptime str("entry") ++ str("(") ++ str("name"));
+            try writeTokens(writer, &.{.directory_entry});
             try strWriter(object.name.?, writer);
-            try writer.writeAll(comptime str("node") ++ str("(") ++ str("type"));
+            try writeTokens(writer, &.{ .node, .l_paren });
 
             switch (object.data) {
                 .directory => {
-                    try writer.writeAll(comptime str("directory"));
+                    try writeTokens(writer, &.{.directory});
                     try iterators.ensureUnusedCapacity(1);
                     const next_dir = try cur.dir_iter.dir.openDir(object.name.?, .{ .iterate = true });
 
@@ -470,9 +467,9 @@ pub fn dumpDirectory(
                 },
                 .file => {
                     const stat = try cur.dir_iter.dir.statFile(object.name.?);
-                    try writer.writeAll(comptime str("regular"));
-                    if (stat.mode & 0o111 != 0) try writer.writeAll(comptime str("executable") ++ str(""));
-                    try writer.writeAll(comptime str("contents"));
+                    try writeTokens(writer, &.{.file});
+                    if (stat.mode & 0o111 != 0) try writeTokens(writer, &.{.executable_file});
+                    try writeTokens(writer, &.{.file_contents});
 
                     try writer.writeInt(u64, stat.size, .little);
                     var left = stat.size;
@@ -492,18 +489,18 @@ pub fn dumpDirectory(
                 },
                 .symlink => {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
-                    try writer.writeAll(comptime str("symlink") ++ str("target"));
+                    try writeTokens(writer, &.{.symlink});
 
                     const link = try cur.dir_iter.dir.readLink(object.name.?, &buf);
 
                     try strWriter(link, writer);
                 },
             }
-            try writer.writeAll(comptime str(")") ++ str(")"));
+            try writeTokens(writer, &.{ .r_paren, .r_paren });
             objects.destroy(@fieldParentPtr("object", object));
         } else while (cur.object_iter.current == null) {
             if (cur.object.object.parent == null) break :next_dir;
-            try writer.writeAll(comptime str(")") ++ str(")"));
+            try writeTokens(writer, &.{ .r_paren, .r_paren });
             cur.dir_iter.dir.close();
 
             objects.destroy(cur.object);
@@ -512,7 +509,7 @@ pub fn dumpDirectory(
             cur = &iterators.buffer[iterators.len - 1];
         }
     }
-    try writer.writeAll(comptime str(")"));
+    try writeTokens(writer, &.{.r_paren});
 }
 
 pub fn dumpFile(file: std.fs.File, writer: anytype) !void {
@@ -649,6 +646,40 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     DuplicateObjectName,
     NotANar,
 };
+
+const Token = enum {
+    magic,
+    l_paren,
+    r_paren,
+    directory,
+    file,
+    symlink,
+    executable_file,
+    file_contents,
+    directory_entry,
+    node,
+};
+
+fn writeTokens(writer: anytype, comptime tokens: []const Token) !void {
+    comptime var concatenated: []const u8 = "";
+
+    comptime {
+        for (tokens) |token| concatenated = concatenated ++ switch (token) {
+            .magic => str("nix-archive-1"),
+            .l_paren => str("("),
+            .r_paren => str(")"),
+            .directory => str("type") ++ str("directory"),
+            .file => str("type") ++ str("regular"),
+            .symlink => str("type") ++ str("symlink") ++ str("target"),
+            .executable_file => str("executable") ++ str(""),
+            .file_contents => str("contents"),
+            .directory_entry => str("entry") ++ str("(") ++ str("name"),
+            .node => str("node"),
+        };
+    }
+
+    try writer.writeAll(concatenated);
+}
 
 fn prevLevel(slice: *[]u8, depth: *u64) EncodeError!void {
     try expectMatch(slice, ")");
@@ -844,8 +875,8 @@ test "more complex" {
     var root = try std.fs.cwd().openDir(tests_path ++ "/complex", .{ .iterate = true });
     defer root.close();
 
-    const expected = @embedFile("tests/complex.nar") ++ @embedFile("tests/complex.nar")
-        ++ @embedFile("tests/complex_empty.nar") ++ @embedFile("tests/complex_empty.nar");
+    const expected = @embedFile("tests/complex.nar") ++ @embedFile("tests/complex.nar") ++
+        @embedFile("tests/complex_empty.nar") ++ @embedFile("tests/complex_empty.nar");
 
     var array: std.BoundedArray(u8, expected.len) = .{};
     const writer = array.writer();
