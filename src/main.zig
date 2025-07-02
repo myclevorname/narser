@@ -5,6 +5,40 @@ const fatal = std.process.fatal;
 
 const max_depth: usize = 256;
 
+const help_message =
+    \\narser: Nix ARchive parSER
+    \\
+    \\Options:
+    \\    -h, -?  Display this help message
+    \\    -l, -L  Long listing (ls only) (TODO)
+    \\    -r, -R  Recurse (ls only) (TODO)
+    \\    -x      Standard input is executable (pack only)
+    \\
+    \\Commands:
+    \\    unpack <ARCHIVE> <PATH>
+    \\    unpack [ARCHIVE [PATH]]
+    \\        Unpack ARCHIVE into PATH. If ARCHIVE is an archive of a symlink, then
+    \\        PATH is required. Otherwise, PATH defaults to standard output for a file
+    \\        archive and the current working directory for a directory archive. If
+    \\        PATH is omitted, then ARCHIVE defaults to standard input and can be
+    \\        omitted.
+    \\
+    \\    pack [PATH]
+    \\        Pack PATH into a Nix Archive and print the contents to standard output.
+    \\        If PATH is omitted, read from standard input as a file.
+    \\
+    \\    ls [ARCHIVE [PATH]]
+    \\        Show a directory listing of ARCHIVE starting from path PATH. PATH
+    \\        defaults to the archive root if omitted, and ARCHIVE defaults to
+    \\        standard input if omitted. TODO: Support non-recursive and long listings
+    \\
+    \\    cat [ARCHIVE [PATH]]
+    \\        Read the file at PATH from ARCHIVE. If PATH is omitted, then ARCHIVE is
+    \\        assumed to be a file archive. If ARCHIVE is omitted, then the archive is
+    \\        read from standard input.
+    \\
+;
+
 pub fn lsRecursive(archive: *const narser.NarArchive, writer: anytype) !void {
     var node = archive.root;
 
@@ -48,6 +82,73 @@ fn printPath(node: *const narser.Object, writer: anytype) !void {
     try writer.print("\n", .{});
 }
 
+const OptsIter = struct {
+    current: ?[]const u8,
+    iter: *std.process.ArgIterator,
+    finished_options: bool = false,
+    in_option: bool = false,
+
+    const Option = union(enum) {
+        option: u8,
+        argument: []const u8,
+    };
+
+    fn init(iter: *std.process.ArgIterator) OptsIter {
+        return .{ .iter = iter, .current = iter.next() };
+    }
+
+    fn next(self: *OptsIter) ?Option {
+        blk: while (self.current != null) {
+            std.debug.assert(!(self.in_option and self.finished_options));
+            if (self.in_option) {
+                switch (self.current.?.len) {
+                    0 => unreachable,
+                    1 => {
+                        const opt = self.current.?[0];
+                        self.current = self.iter.next();
+                        self.in_option = false;
+                        return .{ .option = opt };
+                    },
+                    else => {
+                        const opt = self.current.?[0];
+                        self.current = self.current.?[1..];
+                        return .{ .option = opt };
+                    },
+                }
+            } else {
+                if (self.finished_options) {
+                    const arg = self.current;
+                    self.current = self.iter.next();
+                    return .{ .argument = arg orelse return null };
+                } else {
+                    if (std.mem.startsWith(u8, self.current.?, "-")) {
+                        if (self.current.?.len == 1) {
+                            const arg = self.current;
+                            self.current = self.iter.next();
+                            return .{ .argument = arg orelse return null };
+                        } else if (std.mem.eql(u8, self.current.?, "--")) {
+                            self.finished_options = true;
+                            const arg = self.iter.next();
+                            self.current = self.iter.next();
+                            return .{ .argument = arg orelse return null };
+                        } else {
+                            self.in_option = true;
+                            self.current = self.current.?[1..];
+                            continue :blk;
+                        }
+                    } else {
+                        const arg = self.current;
+                        self.current = self.iter.next();
+                        return .{ .argument = arg orelse return null };
+                    }
+                }
+            }
+            unreachable;
+        }
+        return null;
+    }
+};
+
 pub fn main() !void {
     const stdout = std.io.getStdOut();
     var bw = std.io.bufferedWriter(stdout.writer());
@@ -62,18 +163,38 @@ pub fn main() !void {
 
     var args = try std.process.ArgIterator.initWithAllocator(allocator);
     defer args.deinit();
+    _ = args.skip();
 
-    // program name
-    std.debug.assert(args.skip());
+    var processed_args: std.ArrayList([]const u8) = .init(allocator);
+    defer processed_args.deinit();
 
-    // TODO: Improve the CLI
+    var opts_iter = OptsIter.init(&args);
+    const Options = struct {
+        show_help: bool = false,
+        long_listing: bool = false,
+        recurse: bool = false,
+        executable: bool = false,
+    };
+    var opts: Options = .{};
 
-    const command = args.next() orelse fatal("No command supplied", .{});
+    while (opts_iter.next()) |arg| switch (arg) {
+        .option => |opt| switch (opt) {
+            'h', '?' => opts.show_help = true,
+            'l', 'L' => opts.long_listing = true,
+            'r', 'R' => opts.recurse = true,
+            'x' => opts.executable = true,
+            else => fatal("Invalid option '{c}'\n{s}", .{ opt, help_message }),
+        },
+        .argument => |str| try processed_args.append(str),
+    };
 
+    if (opts.show_help or processed_args.items.len == 0) return try writer.writeAll(help_message);
+
+    const command = processed_args.items[0];
     if (std.mem.eql(u8, "pack", command)) {
-        const argument = args.next() orelse "-";
+        const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
-            try narser.dumpFile(std.io.getStdIn(), writer);
+            try narser.dumpFile(std.io.getStdIn(), opts.executable, writer);
         } else {
             var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -91,13 +212,13 @@ pub fn main() !void {
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
-                        try narser.dumpFile(file, writer);
+                        try narser.dumpFile(file, null, writer);
                     },
                 }
             }
         }
     } else if (std.mem.eql(u8, "ls", command)) {
-        var argument = args.next() orelse "-";
+        var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
         const contents = try std.fs.cwd().readFileAlloc(
             allocator,
@@ -105,13 +226,24 @@ pub fn main() !void {
             std.math.maxInt(usize),
         );
         defer allocator.free(contents);
+
         var archive = try narser.NarArchive.fromSlice(allocator, contents);
         defer archive.deinit();
+
+        const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
+        archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
+            error.IsFile => fatal("In archive: expected directory, found file", .{}),
+            error.FileNotFound => fatal("In archive: file not found", .{}),
+            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            error.Overflow => fatal("Too many nested symlinks", .{}),
+        };
+
+        if (opts.recurse != true or opts.long_listing == true) @panic("TODO: Long and non-recursive listing");
         try lsRecursive(&archive, writer);
     } else if (std.mem.eql(u8, "cat", command)) {
-        var archive_path = args.next() orelse "-";
+        var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
-        const subpath = args.next() orelse ".";
+        const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
         const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
         defer allocator.free(contents);
@@ -138,7 +270,7 @@ pub fn main() !void {
             .directory => fatal("In archive: expected file, found directory", .{}),
         }
     } else if (std.mem.eql(u8, "unpack", command)) {
-        var archive_path = args.next() orelse "-";
+        var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
 
         const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
@@ -147,7 +279,7 @@ pub fn main() !void {
         var archive = try narser.NarArchive.fromSlice(allocator, contents);
         defer archive.deinit();
 
-        const target_path = args.next();
+        const target_path = if (processed_args.items.len < 3) null else processed_args.items[2];
 
         switch (archive.root.data) {
             .directory => {

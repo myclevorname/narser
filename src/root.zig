@@ -125,7 +125,7 @@ pub const NarArchive = struct {
                 prev = next;
                 try prevLevel(&to_parse, &recursion_depth);
             } else if (matchAndSlide(&to_parse, "directory")) {
-                next.data = .{ .directory = undefined };
+                next.data = .{ .directory = null };
                 parent = next;
                 prev = null;
                 in_directory = true;
@@ -320,9 +320,11 @@ pub const NarArchive = struct {
     }
 
     pub fn unpackDir(self: *const NarArchive, target_dir: std.fs.Dir) !void {
+        if (self.root.data.directory == null) return;
+
         var items: std.BoundedArray(std.fs.Dir, 256) = .{};
         defer if (items.len > 1) for (items.slice()[1..]) |*dir| dir.close();
-        if (self.root.data.directory != null) items.appendAssumeCapacity(target_dir);
+        items.appendAssumeCapacity(target_dir);
 
         var current_node = self.root.data.directory.?;
 
@@ -512,9 +514,9 @@ pub fn dumpDirectory(
     try writeTokens(writer, &.{.r_paren});
 }
 
-pub fn dumpFile(file: std.fs.File, writer: anytype) !void {
+pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
     const stat = try file.stat();
-    const is_executable = stat.mode & 0o111 != 0;
+    const is_executable = executable orelse (stat.mode & 0o111 != 0);
     try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++ str("type") ++ str("regular"));
     if (is_executable) try writer.writeAll(comptime str("executable") ++ str(""));
     try writer.writeAll(comptime str("contents"));
@@ -591,7 +593,7 @@ pub const Object = struct {
             self.data.directory = child;
     }
 
-    pub fn subPath(self: *const Object, subpath: []const u8) !*const Object {
+    pub fn subPath(self: *Object, subpath: []const u8) !*Object {
         var cur = self;
         var parts: std.BoundedArray([]const u8, 4096) = .{};
         parts.appendAssumeCapacity(subpath);
