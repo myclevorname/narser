@@ -30,6 +30,12 @@
             nativeBuildInputs = with pkgs; [ zig.hook ];
             zigBuildFlags = "-Dstrip -Doptimize=ReleaseFast";
           });
+          small = pkgs.stdenv.mkDerivation (final: {
+            name = "narser";
+            src = self;
+            nativeBuildInputs = with pkgs; [ zig.hook ];
+            zigBuildFlags = "-Dstrip -Doptimize=ReleaseSmall";
+          });
         };
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [ zig ];
