@@ -485,7 +485,7 @@ pub fn dumpDirectory(
                     }
 
                     const zeroes: [8]u8 = .{0} ** 8;
-                    try writer.writeAll(zeroes[0 .. (8 - stat.size % 8) % 8]);
+                    try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);
                 },
                 .symlink => {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -532,7 +532,7 @@ pub fn dumpFile(file: std.fs.File, writer: anytype) !void {
     }
 
     const zeroes: [8]u8 = .{0} ** 8;
-    try writer.writeAll(zeroes[0 .. (8 - stat.size % 8) % 8]);
+    try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);
 
     try writer.writeAll(comptime str(")"));
 }
