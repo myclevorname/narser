@@ -259,7 +259,8 @@ pub fn main() !void {
             error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
             error.Overflow => fatal("Too many nested symlinks", .{}),
         };
-
+        archive.root.parent = null;
+        archive.root.next = null;
         try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];

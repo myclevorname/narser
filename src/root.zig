@@ -136,6 +136,8 @@ pub const NarArchive = struct {
         return self;
     }
 
+    /// Converts the contents of a directory into a Nix archive. The directory passed must be
+    /// opened with `.{ .iterate = true }`
     pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NarArchive {
         var self: NarArchive = .{
             .arena = .init(allocator),
@@ -278,6 +280,7 @@ pub const NarArchive = struct {
         };
     }
 
+    /// Serialize a NarArchive into the writer.
     pub fn dump(self: *const NarArchive, writer: anytype) !void {
         var node = self.root;
 
@@ -319,6 +322,7 @@ pub const NarArchive = struct {
         try writeTokens(writer, &.{.r_paren});
     }
 
+    /// Unpacks a Nix archive into a directory.
     pub fn unpackDir(self: *const NarArchive, target_dir: std.fs.Dir) !void {
         if (self.root.data.directory == null) return;
 
@@ -379,6 +383,8 @@ pub const NarArchive = struct {
     }
 };
 
+/// Takes a directory and serializes it as a Nix Archive into `writer`. This is faster and more
+/// memory-efficient than calling `fromDirectory` followed by `dump`.
 pub fn dumpDirectory(
     allocator: std.mem.Allocator,
     root_dir: std.fs.Dir,
@@ -514,6 +520,8 @@ pub fn dumpDirectory(
     try writeTokens(writer, &.{.r_paren});
 }
 
+/// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
+/// memory-efficient than calling `fromFileContents` followed by `dump`.
 pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
     const stat = try file.stat();
     const is_executable = executable orelse (stat.mode & 0o111 != 0);
@@ -593,6 +601,7 @@ pub const Object = struct {
             self.data.directory = child;
     }
 
+    /// Traverses an Object, following symbolic links.
     pub fn subPath(self: *Object, subpath: []const u8) !*Object {
         var cur = self;
         var parts: std.BoundedArray([]const u8, 4096) = .{};
