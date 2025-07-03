@@ -10,8 +10,8 @@ const help_message =
     \\
     \\Options:
     \\    -h, -?  Display this help message
-    \\    -l, -L  Long listing (ls only) (TODO)
-    \\    -r, -R  Recurse (ls only) (TODO)
+    \\    -l, -L  Long listing (ls only)
+    \\    -r, -R  Recurse (ls only)
     \\    -x      Standard input is executable (pack only)
     \\
     \\Commands:
@@ -30,7 +30,7 @@ const help_message =
     \\    ls [ARCHIVE [PATH]]
     \\        Show a directory listing of ARCHIVE starting from path PATH. PATH
     \\        defaults to the archive root if omitted, and ARCHIVE defaults to
-    \\        standard input if omitted. TODO: Support non-recursive and long listings
+    \\        standard input if omitted.
     \\
     \\    cat [ARCHIVE [PATH]]
     \\        Read the file at PATH from ARCHIVE. If PATH is omitted, then ARCHIVE is
@@ -39,16 +39,25 @@ const help_message =
     \\
 ;
 
-pub fn lsRecursive(archive: *const narser.NarArchive, writer: anytype) !void {
+const LsOptions = struct { long: bool, recursive: bool };
+
+pub fn ls(archive: *const narser.NarArchive, writer: anytype, opts: LsOptions) !void {
     var node = archive.root;
 
-    switch (node.data) {
+    if (opts.long) switch (node.data) {
+        .directory => {},
+        .file, .symlink => return try printPath(node, writer, true),
+    } else switch (node.data) {
         .directory => {},
         .file, .symlink => return try writer.writeAll("\n"),
     }
 
+    node = node.data.directory orelse return;
+
     while (true) {
-        if (node.data == .directory and node.data.directory != null) {
+        try printPath(node, writer, opts.long);
+
+        if (opts.recursive and node.data == .directory and node.data.directory != null) {
             node = node.data.directory.?;
         } else {
             while (node.next == null) {
@@ -56,11 +65,21 @@ pub fn lsRecursive(archive: *const narser.NarArchive, writer: anytype) !void {
             }
             node = node.next.?;
         }
-        try printPath(node, writer);
     }
 }
 
-fn printPath(node: *const narser.Object, writer: anytype) !void {
+fn printPath(node: *const narser.Object, writer: anytype, long: bool) !void {
+    if (long) switch (node.data) {
+        .directory => try writer.writeAll("dr-xr-xr-x                    0 "),
+        .symlink => try writer.writeAll("lrwxrwxrwx                    0 "),
+        .file => |metadata| {
+            try writer.writeAll(if (metadata.is_executable) "-r-xr-xr-x" else "-r--r--r--");
+            const spaces: [21]u8 = .{' '} ** (31 - "-r-xr-xr-x".len);
+            const len_size = if (metadata.contents.len == 0) 1 else 1 + std.math.log10_int(metadata.contents.len);
+            try writer.print("{s}{} ", .{ spaces[len_size..], metadata.contents.len });
+        },
+    };
+
     var cur: ?*const narser.Object = node;
     var buf: [max_depth][]u8 = undefined;
     const count: usize = blk: for (0..max_depth) |i| {
@@ -79,6 +98,9 @@ fn printPath(node: *const narser.Object, writer: anytype) !void {
     while (iter.next()) |x| {
         try writer.print("/{s}", .{x});
     }
+
+    if (long and node.data == .symlink) try writer.print(" -> {s}", .{node.data.symlink});
+
     try writer.print("\n", .{});
 }
 
@@ -238,8 +260,7 @@ pub fn main() !void {
             error.Overflow => fatal("Too many nested symlinks", .{}),
         };
 
-        if (opts.recurse != true or opts.long_listing == true) @panic("TODO: Long and non-recursive listing");
-        try lsRecursive(&archive, writer);
+        try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
