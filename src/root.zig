@@ -85,9 +85,11 @@ pub const NarArchive = struct {
             },
             .get_entry_inner => {
                 current.name = try unstr(&stream);
-                if (current.prev != null and
-                    std.mem.order(u8, current.prev.?.name.?, current.name.?) != .lt)
-                    return error.WrongDirectoryOrder;
+                if (current.prev) |p| switch (std.mem.order(u8, p.name.?, current.name.?)) {
+                    .lt => {},
+                    .eq => return error.DuplicateObjectName,
+                    .gt => return error.WrongDirectoryOrder,
+                };
                 try expectToken(&stream, .directory_entry_inner);
                 continue :state .get_object_type;
             },
