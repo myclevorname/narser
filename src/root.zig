@@ -43,96 +43,124 @@ pub const NarArchive = struct {
         self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
-        var to_parse = slice;
-        expectMatch(&to_parse, "nix-archive-1") catch return error.NotANar;
+        var stream = slice;
 
-        var recursion_depth: u64 = 0;
-        var prev: ?*Object = null;
-        var parent: ?*Object = null;
+        var current = try self.pool.create();
+        current.* = .{ .parent = null, .name = null, .data = undefined };
 
-        var root: ?*Object = null;
-        var in_directory = false;
+        self.root = current;
 
-        try nextLevel(&to_parse, &recursion_depth);
+        const State = enum {
+            start,
+            get_object_type,
+            get_entry,
+            get_entry_inner,
+            file,
+            directory,
+            symlink,
+            next,
+            next_skip_end,
+            leave_directory,
+            end,
+        };
+        state: switch (State.start) {
+            .start => {
+                expectToken(&stream, .magic) catch return error.NotANar;
 
-        loop: while (true) {
-            blk: while (true) {
-                if (recursion_depth == 0) break :loop;
-                prevLevel(&to_parse, &recursion_depth) catch |err| switch (err) {
-                    error.InvalidFormat => break :blk,
-                    else => unreachable,
-                };
-
-                // If the depth is even, then we just left a Nar object. The ')" for a file is
-                // already handled, so it must be a directory.
-                // If it is odd, then we are at the next directory entry.
-                //
-                // The only two places where parentheses are used are directory entries and NAR
-                // objects. Directory entries cannot directly contain directory entries and NAR
-                // objects cannot directly contain NAR objects, so checking the depth's parity is
-                // okay.
-                if (recursion_depth % 2 == 0) {
-                    prev = parent;
-                    parent = if (parent) |p| p.parent else null;
-                }
-                continue :blk;
-            }
-
-            var next = try self.pool.create();
-            next.* = .{
-                .prev = prev,
-                .next = null,
-                .parent = parent,
-                .data = undefined,
-                .name = null,
-            };
-
-            if (in_directory) {
-                try expectMatch(&to_parse, "entry");
-                try nextLevel(&to_parse, &recursion_depth);
-                try expectMatch(&to_parse, "name");
-                next.name = try unstr(&to_parse);
-
-                if (prev) |p| switch (mem.order(u8, p.name.?, next.name.?)) {
-                    .lt => {},
-                    .eq => return error.DuplicateObjectName,
-                    .gt => return error.WrongDirectoryOrder,
-                };
-
-                try expectMatch(&to_parse, "node");
-                try nextLevel(&to_parse, &recursion_depth);
-            }
-            if (prev) |obj| {
-                obj.next = next;
-            } else if (parent) |obj| obj.data.directory = next;
-            if (root == null) root = next;
-
-            try expectMatch(&to_parse, "type");
-            if (matchAndSlide(&to_parse, "regular")) {
-                const is_executable = if (matchAndSlide(&to_parse, "executable"))
-                    (if (matchAndSlide(&to_parse, "")) true else return error.InvalidFormat)
+                continue :state .get_object_type;
+            },
+            .get_object_type => {
+                if (matches(&stream, .file))
+                    continue :state .file
+                else if (matches(&stream, .directory))
+                    continue :state .directory
+                else if (matches(&stream, .symlink))
+                    continue :state .symlink
                 else
-                    false;
-                try expectMatch(&to_parse, "contents");
-                const contents = try unstr(&to_parse);
-                next.data = .{ .file = .{ .is_executable = is_executable, .contents = contents } };
+                    return error.InvalidFormat;
+            },
+            .get_entry => {
+                try expectToken(&stream, .directory_entry);
+                continue :state .get_entry_inner;
+            },
+            .get_entry_inner => {
+                current.name = try unstr(&stream);
+                if (current.prev != null and
+                    std.mem.order(u8, current.prev.?.name.?, current.name.?) != .lt)
+                    return error.WrongDirectoryOrder;
+                try expectToken(&stream, .directory_entry_inner);
+                continue :state .get_object_type;
+            },
+            .directory => {
+                current.data = .{ .directory = null };
+                if (current.parent != null) {
+                    if (matches(&stream, .directory_entry_end)) continue :state .next_skip_end;
+                } else {
+                    if (matches(&stream, .archive_end)) {
+                        if (stream.len != 0) return error.InvalidFormat else break :state;
+                    }
+                }
 
-                prev = next;
-                try prevLevel(&to_parse, &recursion_depth);
-            } else if (matchAndSlide(&to_parse, "symlink")) {
-                try expectMatch(&to_parse, "target");
-                next.data = .{ .symlink = try unstr(&to_parse) };
-                prev = next;
-                try prevLevel(&to_parse, &recursion_depth);
-            } else if (matchAndSlide(&to_parse, "directory")) {
-                next.data = .{ .directory = null };
-                parent = next;
-                prev = null;
-                in_directory = true;
-            } else return error.InvalidFormat;
+                // there must be a child at this point
+
+                const child = try self.pool.create();
+                current.data.directory = child;
+                child.* = .{
+                    .parent = current,
+                    .data = undefined,
+                    .name = undefined,
+                };
+                current = child;
+                continue :state .get_entry;
+            },
+            .file => {
+                current.data = .{ .file = .{ .contents = undefined, .is_executable = false } };
+                if (matches(&stream, .executable_file)) current.data.file.is_executable = true;
+                try expectToken(&stream, .file_contents);
+                current.data.file.contents = try unstr(&stream);
+                continue :state .next;
+            },
+            .symlink => {
+                current.data = .{ .symlink = try unstr(&stream) };
+                continue :state .next;
+            },
+            .next => {
+                if (current.parent != null) {
+                    try expectToken(&stream, .directory_entry_end);
+                    continue :state .leave_directory;
+                } else continue :state .end;
+            },
+            .next_skip_end => {
+                continue :state (if (current.parent != null) .leave_directory else .end);
+            },
+            .leave_directory => {
+                while (current.parent != null and matches(&stream, .directory_entry_end)) {
+                    current = current.parent.?;
+                } else {
+                    if (current.parent != null and matches(&stream, .directory_entry)) {
+                        const next = try self.pool.create();
+                        current.next = next;
+                        next.* = .{
+                            .parent = current.parent.?,
+                            .prev = current,
+                            .name = undefined,
+                            .data = undefined,
+                        };
+                        current = next;
+                        continue :state .get_entry_inner;
+                    } else {
+                        continue :state .end;
+                    }
+                }
+            },
+            .end => {
+                try expectToken(&stream, .archive_end);
+                if (stream.len != 0) return error.InvalidFormat;
+                break :state;
+            },
         }
 
-        self.root = root orelse return error.InvalidFormat;
+        //std.debug.print("Success\n", .{});
         return self;
     }
 
@@ -290,10 +318,9 @@ pub const NarArchive = struct {
             if (node.parent != null) {
                 try writeTokens(writer, &.{.directory_entry});
                 try strWriter(node.name.?, writer);
-                try writeTokens(writer, &.{.node});
+                try writeTokens(writer, &.{.directory_entry_inner});
             }
 
-            try writeTokens(writer, &.{.l_paren});
             switch (node.data) {
                 .directory => |child| {
                     try writeTokens(writer, &.{.directory});
@@ -313,13 +340,13 @@ pub const NarArchive = struct {
                     try strWriter(link, writer);
                 },
             }
-            if (node.parent != null) try writeTokens(writer, &.{ .r_paren, .r_paren });
+            if (node.parent != null) try writeTokens(writer, &.{.directory_entry_end});
             while (node.next == null) {
                 node = node.parent orelse break :loop;
-                if (node.parent != null) try writeTokens(writer, &.{ .r_paren, .r_paren });
+                if (node.parent != null) try writeTokens(writer, &.{.directory_entry_end});
             } else node = node.next.?;
         }
-        try writeTokens(writer, &.{.r_paren});
+        try writeTokens(writer, &.{.archive_end});
     }
 
     /// Unpacks a Nix archive into a directory.
@@ -408,7 +435,7 @@ pub fn dumpDirectory(
         }
     };
 
-    try writeTokens(writer, &.{ .magic, .l_paren, .directory });
+    try writeTokens(writer, &.{ .magic, .directory });
 
     var iterators: std.BoundedArray(struct {
         dir_iter: std.fs.Dir.Iterator,
@@ -458,7 +485,7 @@ pub fn dumpDirectory(
         while (cur.object_iter.next()) |object| {
             try writeTokens(writer, &.{.directory_entry});
             try strWriter(object.name.?, writer);
-            try writeTokens(writer, &.{ .node, .l_paren });
+            try writeTokens(writer, &.{.directory_entry_inner});
 
             switch (object.data) {
                 .directory => {
@@ -504,11 +531,11 @@ pub fn dumpDirectory(
                     try strWriter(link, writer);
                 },
             }
-            try writeTokens(writer, &.{ .r_paren, .r_paren });
+            try writeTokens(writer, &.{.directory_entry_end});
             objects.destroy(@fieldParentPtr("object", object));
         } else while (cur.object_iter.current == null) {
             if (cur.object.object.parent == null) break :next_dir;
-            try writeTokens(writer, &.{ .r_paren, .r_paren });
+            try writeTokens(writer, &.{.directory_entry_end});
             cur.dir_iter.dir.close();
 
             objects.destroy(cur.object);
@@ -517,7 +544,7 @@ pub fn dumpDirectory(
             cur = &iterators.buffer[iterators.len - 1];
         }
     }
-    try writeTokens(writer, &.{.r_paren});
+    try writeTokens(writer, &.{.archive_end});
 }
 
 /// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
@@ -660,51 +687,67 @@ pub const EncodeError = std.mem.Allocator.Error || error{
 
 const Token = enum {
     magic,
-    l_paren,
-    r_paren,
+    archive_end,
     directory,
     file,
     symlink,
     executable_file,
     file_contents,
     directory_entry,
-    node,
+    directory_entry_inner,
+    directory_entry_end,
 };
+
+const token_map = std.StaticStringMap(Token).initComptime(.{
+    .{ str("nix-archive-1") ++ str("("), .magic },
+    .{ str(")"), .archive_end },
+    .{ str("type") ++ str("directory"), .directory },
+    .{ str("type") ++ str("regular"), .file },
+    .{ str("type") ++ str("symlink") ++ str("target"), .symlink },
+    .{ str("executable") ++ str(""), .executable_file },
+    .{ str("contents"), .file_contents },
+    .{ str("entry") ++ str("(") ++ str("name"), .directory_entry },
+    .{ str(")") ++ str(")"), .directory_entry_end },
+    .{ str("node") ++ str("("), .directory_entry_inner },
+});
+
+fn getTokenString(comptime value: Token) []const u8 {
+    const values = token_map.values();
+    const index = std.mem.indexOfScalar(Token, values, value).?;
+
+    return token_map.keys()[index];
+}
+
+fn matches(slice: *[]u8, comptime token: Token) bool {
+    return if (expectToken(slice, token)) |_| true else |_| false;
+}
+
+fn expectToken(slice: *[]u8, comptime token: Token) !void {
+    //std.debug.print("Trying to match token {} ", .{token});
+    if (expectMatch(slice, getTokenString(token))) |_| {
+        //std.debug.print("YES\n", .{});
+    } else |e| {
+        //std.debug.print("NO\n", .{});
+        return e;
+    }
+}
+
+fn expectMatch(slice: *[]u8, comptime match: []const u8) !void {
+    if (!matchAndSlide(slice, match)) return error.InvalidFormat;
+}
 
 fn writeTokens(writer: anytype, comptime tokens: []const Token) !void {
     comptime var concatenated: []const u8 = "";
 
     comptime {
-        for (tokens) |token| concatenated = concatenated ++ switch (token) {
-            .magic => str("nix-archive-1"),
-            .l_paren => str("("),
-            .r_paren => str(")"),
-            .directory => str("type") ++ str("directory"),
-            .file => str("type") ++ str("regular"),
-            .symlink => str("type") ++ str("symlink") ++ str("target"),
-            .executable_file => str("executable") ++ str(""),
-            .file_contents => str("contents"),
-            .directory_entry => str("entry") ++ str("(") ++ str("name"),
-            .node => str("node"),
-        };
+        for (tokens) |token| concatenated = concatenated ++ getTokenString(token);
     }
 
     try writer.writeAll(concatenated);
 }
 
-fn prevLevel(slice: *[]u8, depth: *u64) EncodeError!void {
-    try expectMatch(slice, ")");
-    if (depth.* == 0) unreachable else depth.* -= 1;
-}
-
-fn nextLevel(slice: *[]u8, depth: *u64) EncodeError!void {
-    try expectMatch(slice, "(");
-    depth.* += 1;
-}
-
 /// Compares the start of a slice and a comptime-known match, and advances the slice if it matches.
-fn matchAndSlide(slice: *[]u8, comptime match_: []const u8) bool {
-    const match = comptime str(match_);
+fn matchAndSlide(slice: *[]u8, comptime match: []const u8) bool {
     if (match.len % 8 != 0) @compileError("match is not a multiple of 8 and is of size " ++
         std.fmt.digits2(@intCast(match.len)));
 
@@ -713,14 +756,6 @@ fn matchAndSlide(slice: *[]u8, comptime match_: []const u8) bool {
     const matched = mem.eql(u8, slice.*[0..match.len], match);
     if (matched) slice.* = slice.*[match.len..];
     return matched;
-}
-
-fn expectMatch(slice: *[]u8, comptime match: []const u8) !void {
-    if (!matchAndSlide(slice, match)) return error.InvalidFormat;
-}
-
-fn expectNoMatch(slice: *[]u8, comptime match: []const u8) !void {
-    if (matchAndSlide(slice, match)) return error.InvalidFormat;
 }
 
 fn unstr(slice: *[]u8) EncodeError![]u8 {
@@ -886,35 +921,39 @@ test "more complex" {
     var root = try std.fs.cwd().openDir(tests_path ++ "/complex", .{ .iterate = true });
     defer root.close();
 
-    const expected = @embedFile("tests/complex.nar") ++ @embedFile("tests/complex.nar") ++
-        @embedFile("tests/complex_empty.nar") ++ @embedFile("tests/complex_empty.nar");
+    const expected = @embedFile("tests/complex.nar") ** 3 ++
+        @embedFile("tests/complex_empty.nar") ** 2;
 
-    var array: std.BoundedArray(u8, expected.len) = .{};
+    var array: std.BoundedArray(u8, 2 * expected.len) = .{};
     const writer = array.writer();
 
-    var cds = std.io.changeDetectionStream(expected, writer);
-    const cds_writer = cds.writer();
-
     {
-        try dumpDirectory(allocator, root, cds_writer);
+        try dumpDirectory(allocator, root, writer);
 
         var archive = try NarArchive.fromDirectory(allocator, root);
         defer archive.deinit();
 
-        try archive.dump(cds_writer);
+        try archive.dump(writer);
+
+        const contents: []u8 = @constCast(@embedFile("tests/complex.nar"));
+
+        var other_archive = try NarArchive.fromSlice(allocator, contents);
+        defer other_archive.deinit();
+
+        try other_archive.dump(writer);
     }
     {
         var empty = try root.openDir("empty", .{ .iterate = true });
         defer empty.close();
 
-        try dumpDirectory(allocator, empty, cds_writer);
+        try dumpDirectory(allocator, empty, writer);
 
         var archive = try NarArchive.fromDirectory(allocator, empty);
         defer archive.deinit();
 
-        try archive.dump(cds_writer);
+        try archive.dump(writer);
     }
 
     // TODO: Add more dumps and froms
-    if (cds.changeDetected()) return error.NoMatch;
+    try std.testing.expectEqualSlices(u8, expected, array.slice());
 }
