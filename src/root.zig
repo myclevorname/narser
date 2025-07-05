@@ -21,10 +21,10 @@ inline fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"f
 ///
 /// Preconditions:
 ///
-/// 1. The object pointed to by root must have no name, no previous or next, and no parent.
+/// 1. The object pointed to by root must have `entry` be null.
 ///
-/// 2. The object a directory points to must have a name, have no previous object, and has a parent
-/// set to said directory.
+/// 2. The object a directory points to must have a non-null entry, have no previous object, and
+/// has a parent set to said directory.
 ///
 /// 3. All objects in a directory must be sorted by name and must be unique within a directory.
 pub const NarArchive = struct {
@@ -46,7 +46,7 @@ pub const NarArchive = struct {
         var stream = slice;
 
         var current = try self.pool.create();
-        current.* = .{ .parent = null, .name = null, .data = undefined };
+        current.* = .{ .entry = null, .data = undefined };
 
         self.root = current;
 
@@ -84,8 +84,8 @@ pub const NarArchive = struct {
                 continue :state .get_entry_inner;
             },
             .get_entry_inner => {
-                current.name = try unstr(&stream);
-                if (current.prev) |p| switch (std.mem.order(u8, p.name.?, current.name.?)) {
+                current.entry.?.name = try unstr(&stream);
+                if (current.entry.?.prev) |p| switch (std.mem.order(u8, p.entry.?.name, current.entry.?.name)) {
                     .lt => {},
                     .eq => return error.DuplicateObjectName,
                     .gt => return error.WrongDirectoryOrder,
@@ -95,7 +95,7 @@ pub const NarArchive = struct {
             },
             .directory => {
                 current.data = .{ .directory = null };
-                if (current.parent != null) {
+                if (current.entry != null) {
                     if (matches(&stream, .directory_entry_end)) continue :state .next_skip_end;
                 } else {
                     if (matches(&stream, .archive_end)) {
@@ -108,9 +108,11 @@ pub const NarArchive = struct {
                 const child = try self.pool.create();
                 current.data.directory = child;
                 child.* = .{
-                    .parent = current,
+                    .entry = .{
+                        .parent = current,
+                        .name = undefined,
+                    },
                     .data = undefined,
-                    .name = undefined,
                 };
                 current = child;
                 continue :state .get_entry;
@@ -127,25 +129,27 @@ pub const NarArchive = struct {
                 continue :state .next;
             },
             .next => {
-                if (current.parent != null) {
+                if (current.entry != null) {
                     try expectToken(&stream, .directory_entry_end);
                     continue :state .leave_directory;
                 } else continue :state .end;
             },
             .next_skip_end => {
-                continue :state (if (current.parent != null) .leave_directory else .end);
+                continue :state (if (current.entry != null) .leave_directory else .end);
             },
             .leave_directory => {
-                while (current.parent != null and matches(&stream, .directory_entry_end)) {
-                    current = current.parent.?;
+                while (current.entry != null and matches(&stream, .directory_entry_end)) {
+                    current = current.entry.?.parent;
                 } else {
-                    if (current.parent != null and matches(&stream, .directory_entry)) {
+                    if (current.entry != null and matches(&stream, .directory_entry)) {
                         const next = try self.pool.create();
-                        current.next = next;
+                        current.entry.?.next = next;
                         next.* = .{
-                            .parent = current.parent.?,
-                            .prev = current,
-                            .name = undefined,
+                            .entry = .{
+                                .parent = current.entry.?.parent,
+                                .prev = current,
+                                .name = undefined,
+                            },
                             .data = undefined,
                         };
                         current = next;
@@ -179,8 +183,7 @@ pub const NarArchive = struct {
 
         const root_node = try self.pool.create();
         root_node.* = .{
-            .parent = null,
-            .name = null,
+            .entry = null,
             .data = .{ .directory = null },
         };
         self.root = root_node;
@@ -203,13 +206,13 @@ pub const NarArchive = struct {
 
             if (entry) |e| {
                 const next = try self.pool.create();
+                next.*.entry = .{
+                    .parent = cur.object,
+                    .name = try self.arena.allocator().dupe(u8, e.name),
+                };
                 switch (e.kind) {
                     .directory => {
-                        next.* = .{
-                            .parent = cur.object,
-                            .name = try self.arena.allocator().dupe(u8, e.name),
-                            .data = .{ .directory = null },
-                        };
+                        next.*.data = .{ .directory = null };
                         var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
                         iters.append(.{
                             .iterator = child.iterate(),
@@ -217,21 +220,13 @@ pub const NarArchive = struct {
                         }) catch @panic("Implementation limit reached: Directory nested too deeply");
                     },
                     .sym_link => {
-                        next.* = .{
-                            .parent = cur.object,
-                            .name = try self.arena.allocator().dupe(u8, e.name),
-                            .data = .{ .symlink = undefined },
-                        };
+                        next.*.data = .{ .symlink = undefined };
                         var buf: [std.fs.max_path_bytes]u8 = undefined;
                         const link = try cur.iterator.dir.readLink(e.name, &buf);
                         next.data.symlink = try self.arena.allocator().dupe(u8, link);
                     },
                     else => {
-                        next.* = .{
-                            .parent = cur.object,
-                            .name = try self.arena.allocator().dupe(u8, e.name),
-                            .data = .{ .file = undefined },
-                        };
+                        next.*.data = .{ .file = undefined };
                         const stat = try cur.iterator.dir.statFile(e.name);
                         const contents = try cur.iterator.dir.readFileAllocOptions(
                             self.arena.allocator(),
@@ -272,8 +267,7 @@ pub const NarArchive = struct {
         const node = try pool.create();
 
         node.* = .{
-            .parent = null,
-            .name = null,
+            .entry = null,
             .data = .{ .file = .{ .is_executable = is_executable, .contents = copy } },
         };
 
@@ -298,8 +292,7 @@ pub const NarArchive = struct {
         const copy = try arena.allocator().dupe(u8, target);
 
         node.* = .{
-            .parent = null,
-            .name = null,
+            .entry = null,
             .data = .{ .symlink = copy },
         };
 
@@ -317,9 +310,9 @@ pub const NarArchive = struct {
         try writeTokens(writer, &.{.magic});
 
         loop: while (true) {
-            if (node.parent != null) {
+            if (node.entry != null) {
                 try writeTokens(writer, &.{.directory_entry});
-                try strWriter(node.name.?, writer);
+                try strWriter(node.entry.?.name, writer);
                 try writeTokens(writer, &.{.directory_entry_inner});
             }
 
@@ -342,11 +335,11 @@ pub const NarArchive = struct {
                     try strWriter(link, writer);
                 },
             }
-            if (node.parent != null) try writeTokens(writer, &.{.directory_entry_end});
-            while (node.next == null) {
-                node = node.parent orelse break :loop;
-                if (node.parent != null) try writeTokens(writer, &.{.directory_entry_end});
-            } else node = node.next.?;
+            if (node.entry != null) try writeTokens(writer, &.{.directory_entry_end});
+            while ((node.entry orelse break :loop).next == null) {
+                node = node.entry.?.parent;
+                if (node.entry != null) try writeTokens(writer, &.{.directory_entry_end});
+            } else node = node.entry.?.next.?;
         }
         try writeTokens(writer, &.{.archive_end});
     }
@@ -372,37 +365,39 @@ pub const NarArchive = struct {
             switch (current_node.data) {
                 .file => |metadata| {
                     try cwd.writeFile(.{
-                        .sub_path = current_node.name.?,
+                        .sub_path = current_node.entry.?.name,
                         .data = metadata.contents,
                         .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
                     });
                 },
                 .symlink => |target| {
-                    cwd.deleteFile(current_node.name.?) catch {};
-                    try cwd.symLink(target, current_node.name.?, .{});
+                    cwd.deleteFile(current_node.entry.?.name) catch {};
+                    try cwd.symLink(target, current_node.entry.?.name, .{});
                 },
                 .directory => |child| {
-                    if (std.mem.eql(u8, current_node.name.?, "..") or
-                        std.mem.containsAtLeastScalar(u8, current_node.name.?, 1, '/'))
+                    if (std.mem.eql(u8, current_node.entry.?.name, "..") or
+                        std.mem.containsAtLeastScalar(u8, current_node.entry.?.name, 1, '/'))
                         return error.MaliciousArchive;
-                    if (std.mem.eql(u8, ".", current_node.name.?))
+                    if (std.mem.eql(u8, ".", current_node.entry.?.name))
                         return error.MaliciousArchive;
-                    try cwd.makeDir(current_node.name.?);
+                    if (std.mem.indexOfScalar(u8, current_node.entry.?.name, 0) != null)
+                        return error.MaliciousArchive;
+                    try cwd.makeDir(current_node.entry.?.name);
                     if (child) |node| {
                         try items.ensureUnusedCapacity(1);
-                        const next = try cwd.openDir(current_node.name.?, .{});
+                        const next = try cwd.openDir(current_node.entry.?.name, .{});
                         items.appendAssumeCapacity(next);
                         current_node = node;
                         continue;
                     }
                 },
             }
-            while (current_node.next == null) {
-                current_node = current_node.parent orelse return;
+            while ((current_node.entry orelse return).next == null) {
+                current_node = current_node.entry.?.parent;
                 var dir = items.pop().?;
-                if (current_node.parent != null) dir.close();
+                if (current_node.entry != null) dir.close();
             }
-            current_node = current_node.next.?;
+            current_node = current_node.entry.?.next.?;
         }
     }
 
@@ -432,7 +427,7 @@ pub fn dumpDirectory(
         fn next(self: *Self) ?*Object {
             const ret = self.current;
 
-            if (ret) |cur| self.current = cur.next;
+            if (ret) |cur| self.current = cur.entry.?.next;
             return ret;
         }
     };
@@ -452,8 +447,7 @@ pub fn dumpDirectory(
     const root_object = try objects.create();
 
     root_object.object = .{
-        .parent = null,
-        .name = null,
+        .entry = null,
         .data = .{ .directory = null },
     };
 
@@ -470,8 +464,10 @@ pub fn dumpDirectory(
 
             @memcpy(next_object.name[0..entry.name.len], entry.name);
             next_object.object = .{
-                .parent = &cur.object.object,
-                .name = next_object.name[0..entry.name.len],
+                .entry = .{
+                    .parent = &cur.object.object,
+                    .name = next_object.name[0..entry.name.len],
+                },
                 .data = switch (entry.kind) {
                     .directory => .{ .directory = null },
                     .sym_link => .{ .symlink = undefined },
@@ -486,14 +482,14 @@ pub fn dumpDirectory(
 
         while (cur.object_iter.next()) |object| {
             try writeTokens(writer, &.{.directory_entry});
-            try strWriter(object.name.?, writer);
+            try strWriter(object.entry.?.name, writer);
             try writeTokens(writer, &.{.directory_entry_inner});
 
             switch (object.data) {
                 .directory => {
                     try writeTokens(writer, &.{.directory});
                     try iterators.ensureUnusedCapacity(1);
-                    const next_dir = try cur.dir_iter.dir.openDir(object.name.?, .{ .iterate = true });
+                    const next_dir = try cur.dir_iter.dir.openDir(object.entry.?.name, .{ .iterate = true });
 
                     const next = iterators.addOneAssumeCapacity();
                     next.* = .{
@@ -503,7 +499,7 @@ pub fn dumpDirectory(
                     continue :next_dir;
                 },
                 .file => {
-                    const stat = try cur.dir_iter.dir.statFile(object.name.?);
+                    const stat = try cur.dir_iter.dir.statFile(object.entry.?.name);
                     try writeTokens(writer, &.{.file});
                     if (stat.mode & 0o111 != 0) try writeTokens(writer, &.{.executable_file});
                     try writeTokens(writer, &.{.file_contents});
@@ -511,7 +507,7 @@ pub fn dumpDirectory(
                     try writer.writeInt(u64, stat.size, .little);
                     var left = stat.size;
 
-                    var file = try cur.dir_iter.dir.openFile(object.name.?, .{});
+                    var file = try cur.dir_iter.dir.openFile(object.entry.?.name, .{});
                     defer file.close();
 
                     while (left != 0) {
@@ -528,7 +524,7 @@ pub fn dumpDirectory(
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
                     try writeTokens(writer, &.{.symlink});
 
-                    const link = try cur.dir_iter.dir.readLink(object.name.?, &buf);
+                    const link = try cur.dir_iter.dir.readLink(object.entry.?.name, &buf);
 
                     try strWriter(link, writer);
                 },
@@ -536,7 +532,7 @@ pub fn dumpDirectory(
             try writeTokens(writer, &.{.directory_entry_end});
             objects.destroy(@fieldParentPtr("object", object));
         } else while (cur.object_iter.current == null) {
-            if (cur.object.object.parent == null) break :next_dir;
+            if (cur.object.object.entry == null) break :next_dir;
             try writeTokens(writer, &.{.directory_entry_end});
             cur.dir_iter.dir.close();
 
@@ -554,9 +550,9 @@ pub fn dumpDirectory(
 pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
     const stat = try file.stat();
     const is_executable = executable orelse (stat.mode & 0o111 != 0);
-    try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++ str("type") ++ str("regular"));
-    if (is_executable) try writer.writeAll(comptime str("executable") ++ str(""));
-    try writer.writeAll(comptime str("contents"));
+    try writeTokens(writer, &.{ .magic, .file });
+    if (is_executable) try writeTokens(writer, &.{.executable_file});
+    try writeTokens(writer, &.{.file_contents});
 
     try writer.writeInt(u64, stat.size, .little);
 
@@ -573,24 +569,25 @@ pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
     const zeroes: [8]u8 = .{0} ** 8;
     try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);
 
-    try writer.writeAll(comptime str(")"));
+    try writeTokens(writer, &.{.archive_end});
 }
 
 pub fn dumpSymlink(target: []const u8, writer: anytype) !void {
-    try writer.writeAll(comptime str("nix-archive-1") ++ str("(") ++
-        str("type") ++
-        str("symlink") ++ str("target"));
+    try writeTokens(writer, &.{ .magic, .symlink });
     try strWriter(target, writer);
-
-    try writer.writeAll(comptime str(")"));
+    try writeTokens(writer, &.{.archive_end});
 }
 
 pub const Object = struct {
-    parent: ?*Object,
-    prev: ?*Object = null,
-    next: ?*Object = null,
-    name: ?[]u8,
+    entry: ?DirectoryEntry,
     data: Data,
+
+    pub const DirectoryEntry = struct {
+        parent: *Object,
+        prev: ?*Object = null,
+        next: ?*Object = null,
+        name: []u8,
+    };
 
     pub const Data = union(enum) {
         file: File,
@@ -598,31 +595,36 @@ pub const Object = struct {
         directory: ?*Object,
     };
 
+    pub const File = struct {
+        is_executable: bool,
+        contents: []u8,
+    };
+
     pub fn insertChild(self: *Object, child: *Object) error{DuplicateObjectName}!void {
         if (self.data.directory) |first|
-            switch (mem.order(u8, first.name.?, child.name.?)) {
+            switch (mem.order(u8, first.entry.?.name, child.entry.?.name)) {
                 .lt => {
                     var left = first;
-                    while (left.next != null and mem.order(u8, left.name.?, child.name.?) == .lt) {
-                        left = left.next.?;
-                    } else switch (mem.order(u8, left.name.?, child.name.?)) {
+                    while (left.entry.?.next != null and mem.order(u8, left.entry.?.name, child.entry.?.name) == .lt) {
+                        left = left.entry.?.next.?;
+                    } else switch (mem.order(u8, left.entry.?.name, child.entry.?.name)) {
                         .eq => return error.DuplicateObjectName,
                         .lt => {
-                            left.next = child;
-                            child.prev = left;
+                            left.entry.?.next = child;
+                            child.entry.?.prev = left;
                         },
                         .gt => {
-                            child.prev = left.prev;
-                            child.next = left;
-                            if (left.prev) |p| p.next = child;
-                            left.prev = child;
+                            child.entry.?.prev = left.entry.?.prev;
+                            child.entry.?.next = left;
+                            if (left.entry.?.prev) |p| p.entry.?.next = child;
+                            left.entry.?.prev = child;
                         },
                     }
                 },
                 .eq => return error.DuplicateObjectName,
                 .gt => {
-                    first.prev = child;
-                    child.next = first;
+                    first.entry.?.prev = child;
+                    child.entry.?.next = first;
                     self.data.directory = child;
                 },
             }
@@ -645,21 +647,21 @@ pub const Object = struct {
 
             if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
             if (std.mem.eql(u8, first, "..")) {
-                if (cur.parent) |parent| cur = parent;
+                if (cur.entry) |entry| cur = entry.parent;
                 continue;
             }
 
             cur = if (cur.data == .directory)
                 cur.data.directory orelse return error.FileNotFound
             else
-                @panic(cur.name.?);
+                @panic(cur.entry.?.name);
             find: while (true) {
-                switch (std.mem.order(u8, cur.name.?, first)) {
+                switch (std.mem.order(u8, cur.entry.?.name, first)) {
                     .lt => {},
                     .eq => break :find,
                     .gt => return error.FileNotFound,
                 }
-                cur = cur.next orelse return error.FileNotFound;
+                cur = cur.entry.?.next orelse return error.FileNotFound;
             }
             switch (cur.data) {
                 .directory => {},
@@ -667,17 +669,12 @@ pub const Object = struct {
                 .symlink => |target| {
                     if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
                     try parts.append(target);
-                    cur = cur.parent.?;
+                    cur = cur.entry.?.parent;
                 },
             }
         }
         return cur;
     }
-};
-
-pub const File = struct {
-    is_executable: bool,
-    contents: []u8,
 };
 
 pub const EncodeError = std.mem.Allocator.Error || error{
@@ -726,16 +723,12 @@ fn matches(slice: *[]u8, comptime token: Token) bool {
 
 fn expectToken(slice: *[]u8, comptime token: Token) !void {
     //std.debug.print("Trying to match token {} ", .{token});
-    if (expectMatch(slice, getTokenString(token))) |_| {
+    if (matchAndSlide(slice, getTokenString(token))) {
         //std.debug.print("YES\n", .{});
-    } else |e| {
+    } else {
         //std.debug.print("NO\n", .{});
-        return e;
+        return error.InvalidFormat;
     }
-}
-
-fn expectMatch(slice: *[]u8, comptime match: []const u8) !void {
-    if (!matchAndSlide(slice, match)) return error.InvalidFormat;
 }
 
 fn writeTokens(writer: anytype, comptime tokens: []const Token) !void {
@@ -816,7 +809,7 @@ test "directory containing a single file" {
     const dir = data.root;
     const file = dir.data.directory.?;
     try expectEqualStrings(@embedFile("tests/hello.zig.out"), file.data.file.contents);
-    try expectEqualStrings("main.zig", file.name.?);
+    try expectEqualStrings("main.zig", file.entry.?.name);
 }
 
 test "a file, a directory, and some more files" {
@@ -826,24 +819,24 @@ test "a file, a directory, and some more files" {
     defer data.deinit();
 
     const dir = data.root.data.directory.?;
-    try expectEqualStrings("dir", dir.name.?);
+    try expectEqualStrings("dir", dir.entry.?.name);
 
-    const file1 = dir.next.?;
-    try expectEqual(file1.next, null);
-    try expectEqualStrings("file1", file1.name.?);
+    const file1 = dir.entry.?.next.?;
+    try expectEqual(file1.entry.?.next, null);
+    try expectEqualStrings("file1", file1.entry.?.name);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
 
     const file2 = dir.data.directory.?;
-    try expectEqualStrings("file2", file2.name.?);
+    try expectEqualStrings("file2", file2.entry.?.name);
     try expectEqual(true, file2.data.file.is_executable);
     try expectEqualStrings("bye\n", file2.data.file.contents);
 
-    const file3 = file2.next.?;
+    const file3 = file2.entry.?.next.?;
     try expectEqual(false, file3.data.file.is_executable);
-    try expectEqualStrings("file3", file3.name.?);
+    try expectEqualStrings("file3", file3.entry.?.name);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.next);
+    try expectEqual(null, file3.entry.?.next);
 }
 
 test "a symlink" {
@@ -865,24 +858,24 @@ test "nar from dir-and-files" {
     defer data.deinit();
 
     const dir = data.root.data.directory.?;
-    try expectEqualStrings("dir", dir.name.?);
+    try expectEqualStrings("dir", dir.entry.?.name);
 
-    const file1 = dir.next.?;
-    try expectEqual(null, file1.next);
-    try expectEqualStrings("file1", file1.name.?);
+    const file1 = dir.entry.?.next.?;
+    try expectEqual(null, file1.entry.?.next);
+    try expectEqualStrings("file1", file1.entry.?.name);
     try expectEqual(false, file1.data.file.is_executable);
     try expectEqualStrings("hi\n", file1.data.file.contents);
 
     const file2 = dir.data.directory.?;
-    try expectEqualStrings("file2", file2.name.?);
+    try expectEqualStrings("file2", file2.entry.?.name);
     try expectEqual(true, file2.data.file.is_executable);
     try expectEqualStrings("bye\n", file2.data.file.contents);
 
-    const file3 = file2.next.?;
+    const file3 = file2.entry.?.next.?;
     try expectEqual(false, file3.data.file.is_executable);
-    try expectEqualStrings("file3", file3.name.?);
+    try expectEqualStrings("file3", file3.entry.?.name);
     try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.next);
+    try expectEqual(null, file3.entry.?.next);
 }
 
 test "empty directory" {

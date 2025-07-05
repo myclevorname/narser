@@ -60,10 +60,10 @@ pub fn ls(archive: *const narser.NarArchive, writer: anytype, opts: LsOptions) !
         if (opts.recursive and node.data == .directory and node.data.directory != null) {
             node = node.data.directory.?;
         } else {
-            while (node.next == null) {
-                node = node.parent orelse return;
+            while ((node.entry orelse return).next == null) {
+                node = node.entry.?.parent;
             }
-            node = node.next.?;
+            node = node.entry.?.next.?;
         }
     }
 }
@@ -84,19 +84,19 @@ fn printPath(node: *const narser.Object, writer: anytype, long: bool) !void {
     var buf: [max_depth][]u8 = undefined;
     const count: usize = blk: for (0..max_depth) |i| {
         if (cur) |x| {
-            buf[i] = x.name orelse "";
-            cur = x.parent;
+            buf[i] = if (x.entry) |e| e.name else "";
+            cur = if (x.entry) |e| e.parent else null;
         } else break :blk i;
     } else return error.OutOfMemory;
 
     var iter = std.mem.reverseIterator(buf[0 .. count - 1]);
 
-    if (count == 1) return;
+    if (count != 1) {
+        try writer.print(".", .{});
 
-    try writer.print(".", .{});
-
-    while (iter.next()) |x| {
-        try writer.print("/{s}", .{x});
+        while (iter.next()) |x| {
+            try writer.print("/{s}", .{x});
+        }
     }
 
     if (long and node.data == .symlink) try writer.print(" -> {s}", .{node.data.symlink});
@@ -259,8 +259,7 @@ pub fn main() !void {
             error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
             error.Overflow => fatal("Too many nested symlinks", .{}),
         };
-        archive.root.parent = null;
-        archive.root.next = null;
+        archive.root.entry = null;
         try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
