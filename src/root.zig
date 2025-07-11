@@ -9,7 +9,7 @@ const mem = std.mem;
 const divCeil = std.math.divCeil;
 
 /// An alternative @alignOf and std.mem.Alignment.of that changes output based on compiler version.
-inline fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.? {
+fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.? {
     return switch (@typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.?) {
         ?std.mem.Alignment => std.mem.Alignment.of(T),
         ?u29 => @alignOf(T),
@@ -17,38 +17,54 @@ inline fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"f
     };
 }
 
+fn alignment(comptime x: comptime_int) @typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.? {
+    return switch (@typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.?) {
+        ?std.mem.Alignment => std.mem.Alignment.fromByteUnits(x),
+        ?u29 => x,
+        else => |T| @compileError("Expected ?std.mem.Alignment or ?u29, found \"" ++ @typeName(T) ++ "\""),
+    };
+}
+
 /// A Nix Archive file.
 ///
 /// Preconditions:
 ///
-/// 1. The object pointed to by root must have `entry` be null.
+/// 1. The object pointed to by root must have a null `prev`, `next`, and its name is undefined.
 ///
 /// 2. The object a directory points to must have a non-null entry, have no previous object, and
 /// has a parent set to said directory.
 ///
 /// 3. All objects in a directory must be sorted by name and must be unique within a directory.
+///
+/// 4. The root node is the first node in the node list.
 pub const NarArchive = struct {
-    arena: std.heap.ArenaAllocator,
-    pool: std.heap.MemoryPool(Object),
-    root: *Object,
+    allocator: std.mem.Allocator,
+    name_arena: std.heap.ArenaAllocator,
+    node_list: std.ArrayListAlignedUnmanaged(Object, alignment(32)),
+    free_list: std.ArrayListUnmanaged(u32),
 
     /// Takes ownership of a slice representing a Nix archive and deserializes it.
     /// Guaranteed to not modify the slice if an error occurs.
     pub fn fromSlice(allocator: std.mem.Allocator, slice: []u8) EncodeError!NarArchive {
         var self: NarArchive = .{
-            .arena = .init(allocator),
-            .pool = undefined,
-            .root = undefined,
+            .allocator = allocator,
+            .name_arena = .init(allocator),
+            .node_list = .empty,
+            .free_list = .empty,
         };
-        self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
         var stream = slice;
 
-        var current = try self.pool.create();
-        current.* = .{ .entry = null, .data = undefined };
-
-        self.root = current;
+        var index: u32 = 0;
+        try self.node_list.resize(allocator, 1);
+        self.node_list.items[index] = .{
+            .parent = 0,
+            .name = undefined,
+            .prev = .null,
+            .next = .null,
+            .data = undefined,
+        };
 
         const State = enum {
             start,
@@ -84,18 +100,25 @@ pub const NarArchive = struct {
                 continue :state .get_entry_inner;
             },
             .get_entry_inner => {
-                current.entry.?.name = try unstr(&stream);
-                if (current.entry.?.prev) |p| switch (std.mem.order(u8, p.entry.?.name, current.entry.?.name)) {
-                    .lt => {},
-                    .eq => return error.DuplicateObjectName,
-                    .gt => return error.WrongDirectoryOrder,
-                };
+                self.node_list.items[index].name = try unstr(&stream);
+                switch (self.node_list.items[index].prev) {
+                    .null => {},
+                    _ => |x| switch (std.mem.order(
+                        u8,
+                        self.node_list.items[@intFromEnum(x)].name,
+                        self.node_list.items[index].name,
+                    )) {
+                        .lt => {},
+                        .eq => return error.DuplicateObjectName,
+                        .gt => return error.WrongDirectoryOrder,
+                    },
+                }
                 try expectToken(&stream, .directory_entry_inner);
                 continue :state .get_object_type;
             },
             .directory => {
-                current.data = .{ .directory = null };
-                if (current.entry != null) {
+                self.node_list.items[index].data = .{ .directory = .null };
+                if (index != 0) {
                     if (matches(&stream, .directory_entry_end)) continue :state .next_skip_end;
                 } else {
                     if (matches(&stream, .archive_end)) {
@@ -105,54 +128,55 @@ pub const NarArchive = struct {
 
                 // there must be a child at this point
 
-                const child = try self.pool.create();
-                current.data.directory = child;
+                const child = try self.node_list.addOne();
+                self.node_list.items[index].data.directory = self.node_list.items.len - 1;
                 child.* = .{
-                    .entry = .{
-                        .parent = current,
-                        .name = undefined,
-                    },
+                    .parent = index,
+                    .prev = .null,
+                    .next = .null,
+                    .name = undefined,
                     .data = undefined,
                 };
-                current = child;
+                index = @intCast(self.node_list.items.len - 1);
                 continue :state .get_entry;
             },
             .file => {
-                current.data = .{ .file = .{ .contents = undefined, .is_executable = false } };
-                if (matches(&stream, .executable_file)) current.data.file.is_executable = true;
+                self.node_list.items[index].data = if (matches(&stream, .executable_file))
+                    .{ .executable_file = undefined }
+                else
+                    .{ .non_executable_file = undefined };
                 try expectToken(&stream, .file_contents);
-                current.data.file.contents = try unstr(&stream);
+                self.node_list.items[index].data.file.contents = try unstr(&stream);
                 continue :state .next;
             },
             .symlink => {
-                current.data = .{ .symlink = try unstr(&stream) };
+                self.node_list.items[index].data = .{ .symlink = try unstr(&stream) };
                 continue :state .next;
             },
             .next => {
-                if (current.entry != null) {
+                if (index != 0) {
                     try expectToken(&stream, .directory_entry_end);
                     continue :state .leave_directory;
                 } else continue :state .end;
             },
             .next_skip_end => {
-                continue :state (if (current.entry != null) .leave_directory else .end);
+                continue :state (if (index != 0) .leave_directory else .end);
             },
             .leave_directory => {
-                while (current.entry != null and matches(&stream, .directory_entry_end)) {
-                    current = current.entry.?.parent;
+                while (index != 0 and matches(&stream, .directory_entry_end)) {
+                    index = slice[index].parent;
                 } else {
-                    if (current.entry != null and matches(&stream, .directory_entry)) {
-                        const next = try self.pool.create();
-                        current.entry.?.next = next;
+                    if (index != 0 and matches(&stream, .directory_entry)) {
+                        const next = try self.node_list.addOne();
+                        const next_index: u32 = @intCast(self.node_list.slice.len - 1);
+                        slice[index].next = @enumFromInt(next_index);
                         next.* = .{
-                            .entry = .{
-                                .parent = current.entry.?.parent,
-                                .prev = current,
-                                .name = undefined,
-                            },
+                            .parent = self.node_list.items[index].parent,
+                            .prev = index,
+                            .name = undefined,
                             .data = undefined,
                         };
-                        current = next;
+                        index = next_index;
                         continue :state .get_entry_inner;
                     } else {
                         continue :state .end;
@@ -174,28 +198,31 @@ pub const NarArchive = struct {
     /// opened with `.{ .iterate = true }`
     pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NarArchive {
         var self: NarArchive = .{
-            .arena = .init(allocator),
-            .pool = undefined,
-            .root = undefined,
+            .name_arena = .init(allocator),
+            .node_list = .init(allocator),
+            .free_list = .init(allocator),
         };
-        self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
-        const root_node = try self.pool.create();
-        root_node.* = .{
-            .entry = null,
-            .data = .{ .directory = null },
-        };
-        self.root = root_node;
+        {
+            const root_node = try self.node_list.addOne();
+            root_node.* = .{
+                .parent = 0,
+                .prev = .null,
+                .next = .null,
+                .name = undefined,
+                .data = .{ .directory = .null },
+            };
+        }
 
         var iters: std.BoundedArray(struct {
             iterator: std.fs.Dir.Iterator, // holds the directory
-            object: *Object,
+            object: u32,
         }, 256) = .{};
 
         iters.appendAssumeCapacity(.{
             .iterator = root.iterate(),
-            .object = root_node,
+            .object = 0,
         });
 
         errdefer if (iters.len > 1) for (iters.slice()[1..]) |*x| x.iterator.dir.close();
@@ -205,28 +232,30 @@ pub const NarArchive = struct {
             const entry = try cur.iterator.next();
 
             if (entry) |e| {
-                const next = try self.pool.create();
-                next.*.entry = .{
+                const next = try self.node_list.addOne();
+                next.* = .{
                     .parent = cur.object,
-                    .name = try self.arena.allocator().dupe(u8, e.name),
+                    .prev = .null,
+                    .next = .null,
+                    .name = try self.name_arena.allocator().dupe(u8, e.name),
+                    .data = undefined,
                 };
                 switch (e.kind) {
                     .directory => {
-                        next.*.data = .{ .directory = null };
+                        next.data = .{ .directory = .null };
                         var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
                         iters.append(.{
                             .iterator = child.iterate(),
-                            .object = next,
-                        }) catch @panic("Implementation limit reached: Directory nested too deeply");
+                            .object = @intCast(self.node_list.items.len - 1),
+                        }) catch return error.NestedTooDeep;
                     },
                     .sym_link => {
                         next.*.data = .{ .symlink = undefined };
                         var buf: [std.fs.max_path_bytes]u8 = undefined;
                         const link = try cur.iterator.dir.readLink(e.name, &buf);
-                        next.data.symlink = try self.arena.allocator().dupe(u8, link);
+                        next.data.symlink = try self.name_arena.allocator().dupe(u8, link);
                     },
                     else => {
-                        next.*.data = .{ .file = undefined };
                         const stat = try cur.iterator.dir.statFile(e.name);
                         const contents = try cur.iterator.dir.readFileAllocOptions(
                             self.arena.allocator(),
@@ -236,13 +265,13 @@ pub const NarArchive = struct {
                             alignOf(u8).?,
                             null,
                         );
-                        next.data.file = .{
-                            .contents = contents,
-                            .is_executable = stat.mode & 1 == 1,
+                        next.data = switch (stat.mode & 1 == 1) {
+                            true => .{ .executable_file = contents },
+                            false => .{ .non_executable_file = contents },
                         };
                     },
                 }
-                try cur.object.insertChild(next);
+                try Object.insertChild(&self, cur.object, self.node_list.items.len - 1);
             } else {
                 if (iters.len > 1) cur.iterator.dir.close();
                 _ = iters.pop().?;
@@ -402,7 +431,9 @@ pub const NarArchive = struct {
     }
 
     pub fn deinit(self: *NarArchive) void {
-        self.arena.deinit();
+        self.node_list.deinit();
+        self.name_arena.deinit();
+        self.free_list.deinit();
         self.* = undefined;
     }
 };
@@ -414,135 +445,8 @@ pub fn dumpDirectory(
     root_dir: std.fs.Dir,
     writer: anytype,
 ) !void {
-    const NamedObject = struct {
-        name: [std.fs.max_path_bytes]u8 = undefined,
-        object: Object,
-    };
-
-    const ObjectIterator = struct {
-        current: ?*Object = null,
-
-        const Self = @This();
-
-        fn next(self: *Self) ?*Object {
-            const ret = self.current;
-
-            if (ret) |cur| self.current = cur.entry.?.next;
-            return ret;
-        }
-    };
-
-    try writeTokens(writer, &.{ .magic, .directory });
-
-    var iterators: std.BoundedArray(struct {
-        dir_iter: std.fs.Dir.Iterator,
-        object: *NamedObject,
-        object_iter: ObjectIterator = .{},
-    }, 256) = .{};
-    defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
-
-    var objects = std.heap.MemoryPool(NamedObject).init(allocator);
-    defer objects.deinit();
-
-    const root_object = try objects.create();
-
-    root_object.object = .{
-        .entry = null,
-        .data = .{ .directory = null },
-    };
-
-    iterators.appendAssumeCapacity(.{
-        .dir_iter = root_dir.iterate(),
-        .object = root_object,
-    });
-
-    next_dir: while (true) {
-        var cur = &iterators.buffer[iterators.len - 1];
-
-        if (cur.object_iter.current == null) while (try cur.dir_iter.next()) |entry| {
-            const next_object = try objects.create();
-
-            @memcpy(next_object.name[0..entry.name.len], entry.name);
-            next_object.object = .{
-                .entry = .{
-                    .parent = &cur.object.object,
-                    .name = next_object.name[0..entry.name.len],
-                },
-                .data = switch (entry.kind) {
-                    .directory => .{ .directory = null },
-                    .sym_link => .{ .symlink = undefined },
-                    else => .{ .file = undefined },
-                },
-            };
-
-            try cur.object.object.insertChild(&next_object.object);
-
-            cur.object_iter.current = cur.object.object.data.directory;
-        };
-
-        while (cur.object_iter.next()) |object| {
-            try writeTokens(writer, &.{.directory_entry});
-            try strWriter(object.entry.?.name, writer);
-            try writeTokens(writer, &.{.directory_entry_inner});
-
-            switch (object.data) {
-                .directory => {
-                    try writeTokens(writer, &.{.directory});
-                    try iterators.ensureUnusedCapacity(1);
-                    const next_dir = try cur.dir_iter.dir.openDir(object.entry.?.name, .{ .iterate = true });
-
-                    const next = iterators.addOneAssumeCapacity();
-                    next.* = .{
-                        .object = @fieldParentPtr("object", object),
-                        .dir_iter = next_dir.iterateAssumeFirstIteration(),
-                    };
-                    continue :next_dir;
-                },
-                .file => {
-                    const stat = try cur.dir_iter.dir.statFile(object.entry.?.name);
-                    try writeTokens(writer, &.{.file});
-                    if (stat.mode & 0o111 != 0) try writeTokens(writer, &.{.executable_file});
-                    try writeTokens(writer, &.{.file_contents});
-
-                    try writer.writeInt(u64, stat.size, .little);
-                    var left = stat.size;
-
-                    var file = try cur.dir_iter.dir.openFile(object.entry.?.name, .{});
-                    defer file.close();
-
-                    while (left != 0) {
-                        var buf: [4096 * 8]u8 = undefined;
-                        const read = try file.read(&buf);
-                        try writer.writeAll(buf[0..read]);
-                        left -= read;
-                    }
-
-                    const zeroes: [8]u8 = .{0} ** 8;
-                    try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);
-                },
-                .symlink => {
-                    var buf: [std.fs.max_path_bytes]u8 = undefined;
-                    try writeTokens(writer, &.{.symlink});
-
-                    const link = try cur.dir_iter.dir.readLink(object.entry.?.name, &buf);
-
-                    try strWriter(link, writer);
-                },
-            }
-            try writeTokens(writer, &.{.directory_entry_end});
-            objects.destroy(@fieldParentPtr("object", object));
-        } else while (cur.object_iter.current == null) {
-            if (cur.object.object.entry == null) break :next_dir;
-            try writeTokens(writer, &.{.directory_entry_end});
-            cur.dir_iter.dir.close();
-
-            objects.destroy(cur.object);
-            _ = iterators.pop().?;
-
-            cur = &iterators.buffer[iterators.len - 1];
-        }
-    }
-    try writeTokens(writer, &.{.archive_end});
+    _, _, _ = .{ allocator, root_dir, writer };
+    @panic("TODO: dumpDirectory");
 }
 
 /// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
@@ -579,25 +483,21 @@ pub fn dumpSymlink(target: []const u8, writer: anytype) !void {
 }
 
 pub const Object = struct {
-    entry: ?DirectoryEntry,
+    /// This will be zero for the root object, so you must make sure the index of this object is 0.
+    parent: u32,
+    prev: Index,
+    next: Index,
+    /// This is undefined for the root object.
+    name: []u8,
     data: Data,
 
-    pub const DirectoryEntry = struct {
-        parent: *Object,
-        prev: ?*Object = null,
-        next: ?*Object = null,
-        name: []u8,
-    };
+    pub const Index = enum(u32) { null, _ };
 
     pub const Data = union(enum) {
-        file: File,
+        non_executable_file: []u8,
+        executable_file: []u8,
         symlink: []u8,
-        directory: ?*Object,
-    };
-
-    pub const File = struct {
-        is_executable: bool,
-        contents: []u8,
+        directory: Index,
     };
 
     pub fn insertChild(self: *Object, child: *Object) error{DuplicateObjectName}!void {
@@ -797,7 +697,10 @@ test "single file" {
     var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/README.nar")));
     defer data.deinit();
 
-    try expectEqualStrings(@embedFile("tests/README.out"), data.root.data.file.contents);
+    try expectEqualStrings(
+        @embedFile("tests/README.out"),
+        data.node_list.items[0].data.non_executable_file,
+    );
 }
 
 test "directory containing a single file" {
@@ -806,10 +709,13 @@ test "directory containing a single file" {
     var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/hello.nar")));
     defer data.deinit();
 
-    const dir = data.root;
-    const file = dir.data.directory.?;
-    try expectEqualStrings(@embedFile("tests/hello.zig.out"), file.data.file.contents);
-    try expectEqualStrings("main.zig", file.entry.?.name);
+    const dir = data.node_list.items[0];
+    const file = switch (dir.data.directory) {
+        .null => return error.NullIndex,
+        _ => |x| data.node_list.items[@intFromEnum(x)],
+    };
+    try expectEqualStrings(@embedFile("tests/hello.zig.out"), file.data.non_executable_file);
+    try expectEqualStrings("main.zig", file.name);
 }
 
 test "a file, a directory, and some more files" {
@@ -818,25 +724,36 @@ test "a file, a directory, and some more files" {
     var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/dir-and-files.nar")));
     defer data.deinit();
 
-    const dir = data.root.data.directory.?;
-    try expectEqualStrings("dir", dir.entry.?.name);
+    const list = data.node_list.items;
 
-    const file1 = dir.entry.?.next.?;
-    try expectEqual(file1.entry.?.next, null);
-    try expectEqualStrings("file1", file1.entry.?.name);
-    try expectEqual(false, file1.data.file.is_executable);
-    try expectEqualStrings("hi\n", file1.data.file.contents);
+    const dir = switch (list[0].data.directory) {
+        .null => return error.NullIndex,
+        _ => |x| @intFromEnum(x),
+    };
+    try expectEqualStrings("dir", list[dir].name);
 
-    const file2 = dir.data.directory.?;
-    try expectEqualStrings("file2", file2.entry.?.name);
-    try expectEqual(true, file2.data.file.is_executable);
-    try expectEqualStrings("bye\n", file2.data.file.contents);
+    const file1 = switch (list[dir].next) {
+        .null => return error.NullIndex,
+        _ => |x| @intFromEnum(x),
+    };
+    try expectEqual(list[file1].next, .null);
+    try expectEqualStrings("file1", list[file1].name);
+    try expectEqualStrings("hi\n", list[file1].data.non_executable_file);
 
-    const file3 = file2.entry.?.next.?;
-    try expectEqual(false, file3.data.file.is_executable);
-    try expectEqualStrings("file3", file3.entry.?.name);
-    try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.entry.?.next);
+    const file2 = switch (list[dir].data.directory) {
+        .null => return error.NullIndex,
+        _ => |x| list[@intFromEnum(x)],
+    };
+    try expectEqualStrings("file2", file2.name);
+    try expectEqualStrings("bye\n", file2.data.executable_file);
+
+    const file3 = switch (file2.next) {
+        .null => return error.NullIndex,
+        _ => |x| list[@intFromEnum(x)],
+    };
+    try expectEqualStrings("file3", file3.name);
+    try expectEqualStrings("nevermind\n", file3.data.non_executable_file);
+    try expectEqual(.null, file3.next);
 }
 
 test "a symlink" {
@@ -845,7 +762,7 @@ test "a symlink" {
     var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/symlink.nar")));
     defer data.deinit();
 
-    try expectEqualStrings("README.out", data.root.data.symlink);
+    try expectEqualStrings("README.out", data.node_list.items[0].data.symlink);
 }
 
 test "nar from dir-and-files" {
