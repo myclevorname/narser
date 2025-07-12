@@ -41,35 +41,43 @@ const help_message =
 
 const LsOptions = struct { long: bool, recursive: bool };
 
-pub fn ls(archive: *const narser.NarArchive, writer: anytype, opts: LsOptions) !void {
-    var node = archive.root;
+pub fn ls(archive: *const narser.NarArchive, root_index: u32, writer: anytype, opts: LsOptions) !void {
+    const items = archive.node_list.items;
+    var current = root_index;
 
-    if (opts.long) switch (node.data) {
+    if (opts.long) switch (items[root_index].data) {
         .directory => {},
-        .file, .symlink => return try printPath(node, writer, true),
-    } else switch (node.data) {
+        .non_executable_file, .executable_file, .symlink => return try printPath(archive, root_index, root_index, writer, true,),
+    } else switch (items[root_index].data) {
         .directory => {},
-        .file, .symlink => return try writer.writeAll("\n"),
+        .non_executable_file, .executable_file, .symlink => return try writer.writeAll("\n"),
     }
 
-    node = node.data.directory orelse return;
+    current = items[current].data.directory.index() orelse return;
 
-    while (true) {
-        try printPath(node, writer, opts.long);
+    while (current != root_index) {
+        var current_node = items[current];
+        try printPath(archive, current, root_index, writer, opts.long);
 
-        if (opts.recursive and node.data == .directory and node.data.directory != null) {
-            node = node.data.directory.?;
+        if (opts.recursive and current_node.data == .directory and current_node.data.directory != .null) {
+            current = switch (current_node.data.directory) {
+                .null => unreachable,
+                _ => |x| @intFromEnum(x),
+            };
         } else {
-            while ((node.entry orelse return).next == null) {
-                node = node.entry.?.parent;
+            while (current_node.next == .null) {
+                current = current_node.parent;
+                if (current == root_index) return;
+                current_node = items[current];
             }
-            node = node.entry.?.next.?;
+            current = current.next.index().?;
         }
     }
 }
 
-fn printPath(node: *const narser.Object, writer: anytype, long: bool) !void {
-    if (long) switch (node.data) {
+fn printPath(archive: *const narser.NarArchive, index: u32, root: u32, writer: anytype, long: bool) !void {
+    const items = archive.node_pool.items;
+    if (long) switch (items[index].data) {
         .directory => try writer.writeAll("dr-xr-xr-x                    0 "),
         .symlink => try writer.writeAll("lrwxrwxrwx                    0 "),
         .file => |metadata| {
@@ -80,18 +88,16 @@ fn printPath(node: *const narser.Object, writer: anytype, long: bool) !void {
         },
     };
 
-    var cur: ?*const narser.Object = node;
-    var buf: [max_depth][]u8 = undefined;
-    const count: usize = blk: for (0..max_depth) |i| {
-        if (cur) |x| {
-            buf[i] = if (x.entry) |e| e.name else "";
-            cur = if (x.entry) |e| e.parent else null;
-        } else break :blk i;
-    } else return error.OutOfMemory;
+    var cur = index;
+    var bufs: std.BoundedArray([]const u8, max_depth) = .{};
+    while (cur != root) {
+        bufs.append(items[cur].name) catch return error.NestedTooDeep;
+        cur = items[cur].parent.index().?;
+    }
 
-    var iter = std.mem.reverseIterator(buf[0 .. count - 1]);
+    var iter = std.mem.reverseIterator(bufs.slice());
 
-    if (count != 1) {
+    if (bufs.len != 1) {
         try writer.print(".", .{});
 
         while (iter.next()) |x| {
@@ -99,7 +105,7 @@ fn printPath(node: *const narser.Object, writer: anytype, long: bool) !void {
         }
     }
 
-    if (long and node.data == .symlink) try writer.print(" -> {s}", .{node.data.symlink});
+    if (long and items[index].data == .symlink) try writer.print(" -> {s}", .{items[index].data.symlink});
 
     try writer.print("\n", .{});
 }
@@ -253,14 +259,13 @@ pub fn main() !void {
         defer archive.deinit();
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
-        archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
+        const root_index = archive.node_list.items[0].subPath(subpath) catch |e| switch (e) {
             error.IsFile => fatal("In archive: expected directory, found file", .{}),
             error.FileNotFound => fatal("In archive: file not found", .{}),
             error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
             error.Overflow => fatal("Too many nested symlinks", .{}),
         };
-        archive.root.entry = null;
-        try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
+        try ls(&archive, root_index, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
