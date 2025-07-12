@@ -8,8 +8,9 @@ See also [narz](https://github.com/water-sucks/narz), another Zig-based alternat
 
 ## Building
 
-Narser simultaneously targets the latest stable and nightly release of Zig.
-If narser fails to build on either, that is a bug.
+Narser simultaneously targets the latest stable and nightly releases of Zig.
+If it fails to build on either, that is a bug.
+Due to the new `std.Io` interface on 0.15, only 0.14.1 is supported for now.
 
 ## TODO
 
