@@ -362,6 +362,8 @@ pub const NarArchive = struct {
         }.f;
 
         while (lastItem(items)) |cwd| {
+            if (std.mem.indexOfScalar(u8, current_node.entry.?.name, 0) != null)
+                return error.MaliciousArchive;
             switch (current_node.data) {
                 .file => |metadata| {
                     try cwd.writeFile(.{

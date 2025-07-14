@@ -6,6 +6,8 @@ Currently, `narser pack` is around twice as fast as Nix at packing the Linux ker
 NOTE: Not to be confused with the [Narser](https://github.com/Nacorpio/Narser) parser generator, which is 9 years old.
 See also [narz](https://github.com/water-sucks/narz), another Zig-based alternative.
 
+DO NOT run on a filesystem with case-insensitive file names as that allows an attacker to write to arbitrary files with the same permissions as the invoking user.
+
 ## Building
 
 Narser simultaneously targets the latest stable and nightly releases of Zig.
