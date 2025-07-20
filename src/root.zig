@@ -8,13 +8,8 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const mem = std.mem;
 const divCeil = std.math.divCeil;
 
-/// An alternative @alignOf and std.mem.Alignment.of that changes output based on compiler version.
-inline fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.? {
-    return switch (@typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.?) {
-        ?std.mem.Alignment => std.mem.Alignment.of(T),
-        ?u29 => @alignOf(T),
-        else => |x| @compileError("Expected ?std.mem.Alignment or ?u29, found \"" ++ @typeName(x) ++ "\""),
-    };
+comptime {
+    if (std.fs.max_path_bytes <= 64) @compileError("std.fs.max_path_bytes is too small");
 }
 
 /// A Nix Archive file.
@@ -28,34 +23,40 @@ inline fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"f
 ///
 /// 3. All objects in a directory must be sorted by name and must be unique within a directory.
 pub const NarArchive = struct {
-    arena: std.heap.ArenaAllocator,
-    pool: std.heap.MemoryPool(Object),
-    root: *Object,
+    file_contents_arena: std.heap.ArenaAllocator,
+    list_allocator: std.mem.Allocator,
+    /// For smaller file names (64 is the length of a SHA256 hash in hexadecimal)
+    small_name_list: MemoryPoolIndex([64]u8, .@"64") = .empty,
+    large_name_list: MemoryPoolIndex([std.fs.max_path_bytes]u8, .@"64") = .empty,
+    node_list: MemoryPoolIndex(Object, null) = .empty,
 
     /// Takes ownership of a slice representing a Nix archive and deserializes it.
     /// Guaranteed to not modify the slice if an error occurs.
     pub fn fromSlice(allocator: std.mem.Allocator, slice: []u8) EncodeError!NarArchive {
         var self: NarArchive = .{
-            .arena = .init(allocator),
-            .pool = undefined,
-            .root = undefined,
+            .file_contents_arena = .init(allocator),
+            .list_allocator = allocator,
         };
-        self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
         var stream = slice;
 
-        var current = try self.pool.create();
-        current.* = .{ .entry = null, .data = undefined };
-
-        self.root = current;
+        var current = try self.node_list.create(allocator);
+        var current_node = self.node(current);
+        current_node.* = .{
+            .parent = 0,
+            .data = undefined,
+            .name_index = 0,
+            .name_len = 0,
+        };
 
         const State = enum {
             start,
             get_object_type,
             get_entry,
             get_entry_inner,
-            file,
+            regular_file,
+            executable_file,
             directory,
             symlink,
             next,
@@ -70,32 +71,36 @@ pub const NarArchive = struct {
                 continue :state .get_object_type;
             },
             .get_object_type => {
-                if (matches(&stream, .file))
-                    continue :state .file
+                if (matches(&stream, .regular_file))
+                    continue :state .regular_file
+                else if (matches(&stream, .executable_file))
+                    continue :state .executable_file
                 else if (matches(&stream, .directory))
                     continue :state .directory
                 else if (matches(&stream, .symlink))
                     continue :state .symlink
                 else
-                    return error.InvalidFormat;
+                    return error.UnexpectedToken;
             },
             .get_entry => {
                 try expectToken(&stream, .directory_entry);
                 continue :state .get_entry_inner;
             },
             .get_entry_inner => {
-                current.entry.?.name = try unstr(&stream);
-                if (current.entry.?.prev) |p| switch (std.mem.order(u8, p.entry.?.name, current.entry.?.name)) {
-                    .lt => {},
-                    .eq => return error.DuplicateObjectName,
-                    .gt => return error.WrongDirectoryOrder,
-                };
+                const name = try unstr(&stream);
+                try self.allocName(current, name);
+                if (current_node.prev.index()) |p|
+                    switch (std.mem.order(u8, self.nameString(p), self.nameString(current))) {
+                        .lt => {},
+                        .eq => return error.DuplicateObjectName,
+                        .gt => return error.WrongDirectoryOrder,
+                    };
                 try expectToken(&stream, .directory_entry_inner);
                 continue :state .get_object_type;
             },
             .directory => {
-                current.data = .{ .directory = null };
-                if (current.entry != null) {
+                current_node.data = .{ .directory = .from(null) };
+                if (current != 0) {
                     if (matches(&stream, .directory_entry_end)) continue :state .next_skip_end;
                 } else {
                     if (matches(&stream, .archive_end)) {
@@ -105,23 +110,24 @@ pub const NarArchive = struct {
 
                 // there must be a child at this point
 
-                const child = try self.pool.create();
-                current.data.directory = child;
-                child.* = .{
-                    .entry = .{
-                        .parent = current,
-                        .name = undefined,
-                    },
+                const child = try self.node_list.create(allocator);
+                self.node(current).data.directory = .from(child);
+                self.node(child).* = .{
+                    .parent = current,
+                    .name_index = undefined,
+                    .name_len = undefined,
                     .data = undefined,
                 };
                 current = child;
+                current_node = self.node(child);
                 continue :state .get_entry;
             },
-            .file => {
-                current.data = .{ .file = .{ .contents = undefined, .is_executable = false } };
-                if (matches(&stream, .executable_file)) current.data.file.is_executable = true;
-                try expectToken(&stream, .file_contents);
-                current.data.file.contents = try unstr(&stream);
+            .regular_file => {
+                current_node.data = .{ .regular_file = try unstr(&stream) };
+                continue :state .next;
+            },
+            .executable_file => {
+                current_node.data = .{ .executable_file = try unstr(&stream) };
                 continue :state .next;
             },
             .symlink => {
@@ -129,30 +135,30 @@ pub const NarArchive = struct {
                 continue :state .next;
             },
             .next => {
-                if (current.entry != null) {
+                if (current != 0) {
                     try expectToken(&stream, .directory_entry_end);
                     continue :state .leave_directory;
                 } else continue :state .end;
             },
             .next_skip_end => {
-                continue :state (if (current.entry != null) .leave_directory else .end);
+                continue :state (if (current != 0) .leave_directory else .end);
             },
             .leave_directory => {
-                while (current.entry != null and matches(&stream, .directory_entry_end)) {
-                    current = current.entry.?.parent;
+                while (current != 0 and matches(&stream, .directory_entry_end)) {
+                    current = self.node(current).parent;
                 } else {
-                    if (current.entry != null and matches(&stream, .directory_entry)) {
-                        const next = try self.pool.create();
-                        current.entry.?.next = next;
-                        next.* = .{
-                            .entry = .{
-                                .parent = current.entry.?.parent,
-                                .prev = current,
-                                .name = undefined,
-                            },
+                    if (current != 0 and matches(&stream, .directory_entry)) {
+                        const next = try self.node_list.create(allocator);
+                        self.node(current).next = .from(next);
+                        self.node(next).* = .{
+                            .parent = current.parent,
+                            .prev = .from(current),
+                            .name_index = undefined,
+                            .name_len = undefined,
                             .data = undefined,
                         };
                         current = next;
+                        current_node = self.node(next);
                         continue :state .get_entry_inner;
                     } else {
                         continue :state .end;
@@ -174,76 +180,71 @@ pub const NarArchive = struct {
     /// opened with `.{ .iterate = true }`
     pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NarArchive {
         var self: NarArchive = .{
-            .arena = .init(allocator),
-            .pool = undefined,
-            .root = undefined,
+            .file_contents_arena = .init(allocator),
+            .list_allocator = allocator,
         };
-        self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
-        const root_node = try self.pool.create();
-        root_node.* = .{
-            .entry = null,
+        var current = try self.node_list.create(allocator);
+        self.node(current).* = .{
+            .parent = 0,
+            .name_index = 0,
+            .name_len = 0,
             .data = .{ .directory = null },
         };
-        self.root = root_node;
 
-        var iters: std.BoundedArray(struct {
-            iterator: std.fs.Dir.Iterator, // holds the directory
-            object: *Object,
-        }, 256) = .{};
+        // the iterator holds the directory
+        var iters: std.BoundedArray(std.fs.Dir.Iterator, 256) = .{};
 
-        iters.appendAssumeCapacity(.{
-            .iterator = root.iterate(),
-            .object = root_node,
-        });
+        iters.appendAssumeCapacity(root.iterate());
 
-        errdefer if (iters.len > 1) for (iters.slice()[1..]) |*x| x.iterator.dir.close();
+        errdefer if (iters.len > 1) for (iters.slice()[1..]) |*x| x.dir.close();
 
         while (iters.len != 0) {
             var cur = &iters.slice()[iters.len - 1];
-            const entry = try cur.iterator.next();
+            const entry = try cur.next();
 
             if (entry) |e| {
-                const next = try self.pool.create();
-                next.*.entry = .{
-                    .parent = cur.object,
-                    .name = try self.arena.allocator().dupe(u8, e.name),
+                const next = try self.node_list.create();
+                self.node(next).* = .{
+                    .parent = current,
+                    .name_index = undefined,
+                    .name_len = undefined,
                 };
+                try self.allocName(next, entry.name);
                 switch (e.kind) {
                     .directory => {
-                        next.*.data = .{ .directory = null };
+                        self.node(next).data = .{ .directory = null };
                         var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
-                        iters.append(.{
-                            .iterator = child.iterate(),
-                            .object = next,
-                        }) catch @panic("Implementation limit reached: Directory nested too deeply");
+                        errdefer child.close();
+                        iters.append(child.iterate()) catch return error.NestedTooDeep;
+                        current = next;
                     },
                     .sym_link => {
-                        next.*.data = .{ .symlink = undefined };
+                        self.node(next).data = .{ .symlink = undefined };
                         var buf: [std.fs.max_path_bytes]u8 = undefined;
                         const link = try cur.iterator.dir.readLink(e.name, &buf);
-                        next.data.symlink = try self.arena.allocator().dupe(u8, link);
+                        try allocSymlink(next, link);
                     },
                     else => {
-                        next.*.data = .{ .file = undefined };
                         const stat = try cur.iterator.dir.statFile(e.name);
                         const contents = try cur.iterator.dir.readFileAllocOptions(
-                            self.arena.allocator(),
+                            self.file_contents_arena.allocator(),
                             e.name,
                             std.math.maxInt(usize),
                             std.math.cast(usize, stat.size) orelse std.math.maxInt(usize),
-                            alignOf(u8).?,
+                            .of(u8),
                             null,
                         );
-                        next.data.file = .{
-                            .contents = contents,
-                            .is_executable = stat.mode & 1 == 1,
+                        self.node(next).data = switch (stat.mode & 1) {
+                            0 => .{ .regular_file = contents },
+                            1 => .{ .executable_file = contents },
                         };
                     },
                 }
-                try cur.object.insertChild(next);
+                try current.insertChild(next);
             } else {
+                current = self.node(current).parent;
                 if (iters.len > 1) cur.iterator.dir.close();
                 _ = iters.pop().?;
             }
@@ -255,27 +256,28 @@ pub const NarArchive = struct {
     /// Creates a NAR archive containing a single file given its contents.
     pub fn fromFileContents(
         allocator: std.mem.Allocator,
-        contents: []const u8,
+        contents: []u8,
         is_executable: bool,
     ) std.mem.Allocator.Error!NarArchive {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        var pool = std.heap.MemoryPool(Object).init(arena.allocator());
-        errdefer arena.deinit();
+        var self: NarArchive = .{
+            .file_contents_arena = .init(allocator),
+            .list_allocator = allocator,
+        };
+        errdefer self.deinit();
 
-        const copy = try arena.allocator().dupe(u8, contents);
+        const file = try self.node_list.create(allocator);
 
-        const node = try pool.create();
-
-        node.* = .{
-            .entry = null,
-            .data = .{ .file = .{ .is_executable = is_executable, .contents = copy } },
+        self.node(file).* = .{
+            .parent = 0,
+            .name_index = 0,
+            .name_len = 0,
+            .data = switch (is_executable) {
+                false => .{ .regular_file = contents },
+                true => .{ .executable_file = contents },
+            },
         };
 
-        return .{
-            .arena = arena,
-            .pool = pool,
-            .root = node,
-        };
+        return self;
     }
 
     /// Creates a NAR archive containing a single symlink given its target.
@@ -283,63 +285,63 @@ pub const NarArchive = struct {
         allocator: std.mem.Allocator,
         target: []const u8,
     ) std.mem.Allocator.Error!NarArchive {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        var pool = std.heap.MemoryPool(Object).init(arena.allocator());
-        errdefer arena.deinit();
-
-        const node = try pool.create();
-
-        const copy = try arena.allocator().dupe(u8, target);
-
-        node.* = .{
-            .entry = null,
-            .data = .{ .symlink = copy },
+        var self: NarArchive = .{
+            .file_contents_arena = .init(allocator),
+            .list_allocator = allocator,
         };
 
-        return .{
-            .arena = arena,
-            .pool = pool,
-            .root = node,
+        const root = try self.node_list.create();
+
+        self.node(root).* = .{
+            .parent = 0,
+            .name_index = 0,
+            .name_len = 0,
+            .data = .{ .symlink = undefined },
         };
+
+        try self.allocSymlink(root, target);
     }
 
     /// Serialize a NarArchive into the writer.
     pub fn dump(self: *const NarArchive, writer: anytype) !void {
-        var node = self.root;
+        var current = 0;
 
         try writeTokens(writer, &.{.magic});
 
         loop: while (true) {
-            if (node.entry != null) {
+            if (current != 0) {
                 try writeTokens(writer, &.{.directory_entry});
-                try strWriter(node.entry.?.name, writer);
+                try strWriter(self.nameString(current), writer);
                 try writeTokens(writer, &.{.directory_entry_inner});
             }
 
             switch (node.data) {
                 .directory => |child| {
                     try writeTokens(writer, &.{.directory});
-                    if (child) |next| {
-                        node = next;
+                    if (child.index()) |next| {
+                        current = next;
                         continue;
                     }
                 },
-                .file => |data| {
-                    try writeTokens(writer, &.{.file});
-                    if (data.is_executable) try writeTokens(writer, &.{.executable_file});
-                    try writeTokens(writer, &.{.file_contents});
-                    try strWriter(data.contents, writer);
+                .regular_file => |data| {
+                    try writeTokens(writer, &.{.regular_file});
+                    try strWriter(data, writer);
                 },
-                .symlink => |link| {
+                .executable_file => |data| {
+                    try writeTokens(writer, &.{.executable_file});
+                    try strWriter(data, writer);
+                },
+                .symlink => {
                     try writeTokens(writer, &.{.symlink});
-                    try strWriter(link, writer);
+                    try strWriter(self.symlinkString(current), writer);
                 },
             }
-            if (node.entry != null) try writeTokens(writer, &.{.directory_entry_end});
-            while ((node.entry orelse break :loop).next == null) {
-                node = node.entry.?.parent;
-                if (node.entry != null) try writeTokens(writer, &.{.directory_entry_end});
-            } else node = node.entry.?.next.?;
+            if (current != 0) try writeTokens(writer, &.{.directory_entry_end});
+            while (self.node(current).next.index() == null) {
+                if (current == 0) break :loop;
+                current = self.node(current).parent;
+                if (current != 0) try writeTokens(writer, &.{.directory_entry_end});
+            } else current = self.node(current).next.index().?;
         }
         try writeTokens(writer, &.{.archive_end});
     }
@@ -403,11 +405,99 @@ pub const NarArchive = struct {
         }
     }
 
+    pub fn node(self: *NarArchive, index: u32) *Object {
+        return &self.node_list.array_list.items[index];
+    }
+
+    pub fn symlinkString(self: *NarArchive, node_index: u32) []u8 {
+        const node = self.current(node_index);
+        const index = node.data.symlink.index;
+        const len = node.data.symlink.len;
+        return switch (len) {
+            0 => unreachable, // Don't call this on the root node!
+            1...64 => self.small_name_list.array_list.items[index][0..len],
+            65...std.fs.max_path_bytes => self.large_name_list.array_list.items[index][0..len],
+            else => unreachable, // Not a valid string
+        };
+    }
+
+    pub fn nameString(self: *NarArchive, node_index: u32) []u8 {
+        const node = self.current(node_index);
+        const index = node.name_index;
+        const len = node.name_len;
+        return switch (len) {
+            0 => unreachable, // Don't call this on the root node!
+            1...64 => self.small_name_list.array_list.items[index][0..len],
+            65...std.fs.max_path_bytes => self.large_name_list.array_list.items[index][0..len],
+            else => unreachable, // Not a valid string
+        };
+    }
+
+    pub fn allocSymlink(self: *NarArchive, node_index: u32, target: []const u8) EncodeError!void {
+        self.node(node_index).data.symlink.index = switch (name.len) {
+            0 => return error.NameTooBig,
+            1...64 => try self.small_name_list.create(),
+            65...std.fs.max_path_bytes => try self.large_name_list.create(),
+            else => return error.NameTooBig,
+        };
+        self.node(node_index).data.symlink.len = name.len;
+        @memcpy(self.nameString(node_index), name);
+    }
+
+    pub fn allocName(self: *NarArchive, node_index: u32, name: []const u8) EncodeError!void {
+        self.node(node_index).name_index = switch (name.len) {
+            0 => return error.NameTooBig,
+            1...64 => try self.small_name_list.create(),
+            65...std.fs.max_path_bytes => try self.large_name_list.create(),
+            else => return error.NameTooBig,
+        };
+        self.node(node_index).name_len = name.len;
+        @memcpy(self.nameString(node_index), name);
+    }
+
     pub fn deinit(self: *NarArchive) void {
-        self.arena.deinit();
+        const a = self.list_allocator;
+        self.file_contents_arena.deinit();
+        self.small_name_list.deinit(a);
+        self.large_name_list.deinit(a);
+        self.node_list.deinit(a);
         self.* = undefined;
     }
 };
+
+pub fn MemoryPoolIndex(comptime T: type, comptime alignment: ?std.mem.Alignment) type {
+    return struct {
+        free_list: std.ArrayListUnmanaged(u32),
+        array_list: std.ArrayListAlignedUnmanaged(T, alignment),
+
+        pub const empty: Self = .{
+            .free_list = .empty,
+            .array_list = .empty,
+        };
+
+        pub fn create(self: *Self, allocator: std.mem.Allocator) error{OutOfMemory}!u32 {
+            if (self.free_list.pop()) |index|
+                return index
+            else {
+                _ = try self.array_list.addOne(allocator);
+                try self.free_list.ensureTotalCapacity(allocator, self.array_list.items.len);
+                return @intCast(self.array_list.item.len - 1);
+            }
+        }
+
+        pub fn destroy(self: *Self, index: u32) void {
+            try self.free_list.appendAssumeCapacity(index);
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.free_list.deinit(allocator);
+            self.array_list.deinit(allocator);
+            self.* = undefined;
+        }
+
+        const Self = @This();
+    };
+}
 
 /// Takes a directory and serializes it as a Nix Archive into `writer`. This is faster and more
 /// memory-efficient than calling `fromDirectory` followed by `dump`.
@@ -581,25 +671,33 @@ pub fn dumpSymlink(target: []const u8, writer: anytype) !void {
 }
 
 pub const Object = struct {
-    entry: ?DirectoryEntry,
+    /// 0 for the root node
+    parent: u32,
+    prev: Index = .from(null),
+    next: Index = .from(null),
     data: Data,
-
-    pub const DirectoryEntry = struct {
-        parent: *Object,
-        prev: ?*Object = null,
-        next: ?*Object = null,
-        name: []u8,
-    };
+    name_index: u32,
+    /// 0 for
+    name_len: u32,
 
     pub const Data = union(enum) {
-        file: File,
-        symlink: []u8,
-        directory: ?*Object,
+        regular_file: []u8,
+        executable_file: []u8,
+        symlink: struct { index: u32, len: u32 },
+        directory: Index,
     };
 
-    pub const File = struct {
-        is_executable: bool,
-        contents: []u8,
+    const Index = enum(u32) {
+        _,
+
+        pub fn from(i: ?u32) Index {
+            std.debug.assert(i != 0);
+            return @enumFromInt(i orelse 0);
+        }
+
+        pub fn index(self: Index) ?u32 {
+            return if (self) |i| @intFromEnum(i) else null;
+        }
     };
 
     pub fn insertChild(self: *Object, child: *Object) error{DuplicateObjectName}!void {
@@ -680,20 +778,22 @@ pub const Object = struct {
 };
 
 pub const EncodeError = std.mem.Allocator.Error || error{
-    InvalidFormat,
+    UnexpectedToken,
+    InvalidToken,
     WrongDirectoryOrder,
     DuplicateObjectName,
     NotANar,
+    NameTooLarge,
+    NameTooSmall,
 };
 
 const Token = enum {
     magic,
     archive_end,
     directory,
-    file,
-    symlink,
+    regular_file,
     executable_file,
-    file_contents,
+    symlink,
     directory_entry,
     directory_entry_inner,
     directory_entry_end,
@@ -703,10 +803,9 @@ const token_map = std.StaticStringMap(Token).initComptime(.{
     .{ str("nix-archive-1") ++ str("("), .magic },
     .{ str(")"), .archive_end },
     .{ str("type") ++ str("directory"), .directory },
-    .{ str("type") ++ str("regular"), .file },
+    .{ str("type") ++ str("regular") ++ str("contents"), .regular_file },
     .{ str("type") ++ str("symlink") ++ str("target"), .symlink },
-    .{ str("executable") ++ str(""), .executable_file },
-    .{ str("contents"), .file_contents },
+    .{ str("type") ++ str("regular") ++ str("") ++ str("executable") ++ str(""), .executable_file },
     .{ str("entry") ++ str("(") ++ str("name"), .directory_entry },
     .{ str(")") ++ str(")"), .directory_entry_end },
     .{ str("node") ++ str("("), .directory_entry_inner },
@@ -729,7 +828,7 @@ fn expectToken(slice: *[]u8, comptime token: Token) !void {
         //std.debug.print("YES\n", .{});
     } else {
         //std.debug.print("NO\n", .{});
-        return error.InvalidFormat;
+        return error.UnexpectedToken;
     }
 }
 
@@ -756,18 +855,18 @@ fn matchAndSlide(slice: *[]u8, comptime match: []const u8) bool {
 }
 
 fn unstr(slice: *[]u8) EncodeError![]u8 {
-    if (slice.len < 8) return error.InvalidFormat;
+    if (slice.len < 8) return error.InvalidToken;
 
     const len = std.math.cast(usize, mem.readInt(u64, slice.*[0..8], .little)) orelse return error.OutOfMemory;
     const padded_len = (divCeil(usize, len, 8) catch unreachable) * 8;
 
-    if (slice.*[8..].len < padded_len) return error.InvalidFormat;
+    if (slice.*[8..].len < padded_len) return error.InvalidToken;
 
     slice.* = slice.*[8..];
 
     const result = slice.*[0..len];
 
-    if (!mem.allEqual(u8, slice.*[len..padded_len], 0)) return error.InvalidFormat;
+    if (!mem.allEqual(u8, slice.*[len..padded_len], 0)) return error.InvalidToken;
 
     slice.* = slice.*[padded_len..];
 
@@ -953,4 +1052,8 @@ test "more complex" {
 
     // TODO: Add more dumps and froms
     try std.testing.expectEqualSlices(u8, expected, array.slice());
+}
+
+test {
+    _ = std.testing.refAllDeclsRecursive(@This());
 }

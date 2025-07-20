@@ -172,7 +172,7 @@ const OptsIter = struct {
 };
 
 pub fn main() !void {
-    const stdout = std.io.getStdOut();
+    const stdout = std.fs.File.stdout();
     var bw = std.io.bufferedWriter(stdout.writer());
     defer bw.flush() catch @panic("Failed to fully flush stdout buffer");
 
@@ -322,4 +322,8 @@ pub fn main() !void {
                 fatal("Target path required", .{}),
         }
     } else fatal("Invalid command '{s}'", .{command});
+}
+
+test {
+    _ = std.testing.refAllDeclsRecursive(@This());
 }
