@@ -41,7 +41,7 @@ const help_message =
 
 const LsOptions = struct { long: bool, recursive: bool };
 
-pub fn ls(archive: *const narser.NarArchive, writer: anytype, opts: LsOptions) !void {
+pub fn ls(writer: *std.Io.Writer, archive: *const narser.NarArchive, opts: LsOptions) !void {
     var node = archive.root;
 
     if (opts.long) switch (node.data) {
@@ -68,7 +68,7 @@ pub fn ls(archive: *const narser.NarArchive, writer: anytype, opts: LsOptions) !
     }
 }
 
-fn printPath(node: *const narser.Object, writer: anytype, long: bool) !void {
+fn printPath(writer: *std.Io.Writer, node: *const narser.Object, long: bool) !void {
     if (long) switch (node.data) {
         .directory => try writer.writeAll("dr-xr-xr-x                    0 "),
         .symlink => try writer.writeAll("lrwxrwxrwx                    0 "),
@@ -173,10 +173,10 @@ const OptsIter = struct {
 
 pub fn main() !void {
     const stdout = std.fs.File.stdout();
-    var bw = std.io.bufferedWriter(stdout.writer());
-    defer bw.flush() catch @panic("Failed to fully flush stdout buffer");
-
-    const writer = bw.writer();
+    var buf: [4096]u8 = undefined;
+    var fw = stdout.writer(&buf);
+    var writer = &fw.interface;
+    defer writer.flush() catch @panic("Failed to fully flush stdout buffer");
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -216,12 +216,12 @@ pub fn main() !void {
     if (std.mem.eql(u8, "pack", command)) {
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
-            try narser.dumpFile(std.io.getStdIn(), opts.executable, writer);
+            try narser.dumpFile(writer, std.fs.File.stdin(), opts.executable);
         } else {
             var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
             if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
-                try narser.dumpSymlink(target, writer);
+                try narser.dumpSymlink(writer, target);
             } else |_| {
                 const stat = try std.fs.cwd().statFile(argument);
                 switch (stat.kind) {
@@ -229,12 +229,12 @@ pub fn main() !void {
                     .directory => {
                         var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
                         defer dir.close();
-                        try narser.dumpDirectory(allocator, dir, writer);
+                        try narser.dumpDirectory(allocator, writer, dir);
                     },
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
-                        try narser.dumpFile(file, null, writer);
+                        try narser.dumpFile(writer, file, null);
                     },
                 }
             }
@@ -260,7 +260,7 @@ pub fn main() !void {
             error.Overflow => fatal("Too many nested symlinks", .{}),
         };
         archive.root.entry = null;
-        try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
+        try ls(writer, &archive, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";

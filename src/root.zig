@@ -104,7 +104,7 @@ pub const NarArchive = struct {
                     if (matches(&stream, .directory_entry_end)) continue :state .next_skip_end;
                 } else {
                     if (matches(&stream, .archive_end)) {
-                        if (stream.len != 0) return error.InvalidFormat else break :state;
+                        if (stream.len != 0) return error.UnexpectedToken else break :state;
                     }
                 }
 
@@ -131,7 +131,8 @@ pub const NarArchive = struct {
                 continue :state .next;
             },
             .symlink => {
-                current.data = .{ .symlink = try unstr(&stream) };
+                current_node.data = .{ .symlink = undefined };
+                try self.allocSymlink(current, try unstr(&stream));
                 continue :state .next;
             },
             .next => {
@@ -151,7 +152,7 @@ pub const NarArchive = struct {
                         const next = try self.node_list.create(allocator);
                         self.node(current).next = .from(next);
                         self.node(next).* = .{
-                            .parent = current.parent,
+                            .parent = current_node.parent,
                             .prev = .from(current),
                             .name_index = undefined,
                             .name_len = undefined,
@@ -167,7 +168,7 @@ pub const NarArchive = struct {
             },
             .end => {
                 try expectToken(&stream, .archive_end);
-                if (stream.len != 0) return error.InvalidFormat;
+                if (stream.len != 0) return error.UnexpectedToken;
                 break :state;
             },
         }
@@ -190,7 +191,7 @@ pub const NarArchive = struct {
             .parent = 0,
             .name_index = 0,
             .name_len = 0,
-            .data = .{ .directory = null },
+            .data = .{ .directory = .from(null) },
         };
 
         // the iterator holds the directory
@@ -214,7 +215,7 @@ pub const NarArchive = struct {
                 try self.allocName(next, entry.name);
                 switch (e.kind) {
                     .directory => {
-                        self.node(next).data = .{ .directory = null };
+                        self.node(next).data = .{ .directory = .from(null) };
                         var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
                         errdefer child.close();
                         iters.append(child.iterate()) catch return error.NestedTooDeep;
@@ -303,8 +304,8 @@ pub const NarArchive = struct {
     }
 
     /// Serialize a NarArchive into the writer.
-    pub fn dump(self: *const NarArchive, writer: anytype) !void {
-        var current = 0;
+    pub fn dump(self: *const NarArchive, writer: *std.Io.Writer) !void {
+        var current: u32 = 0;
 
         try writeTokens(writer, &.{.magic});
 
@@ -348,13 +349,14 @@ pub const NarArchive = struct {
 
     /// Unpacks a Nix archive into a directory.
     pub fn unpackDir(self: *const NarArchive, target_dir: std.fs.Dir) !void {
-        if (self.root.data.directory == null) return;
+        if (self.node(0).data.directory.index() == null) return;
 
         var items: std.BoundedArray(std.fs.Dir, 256) = .{};
         defer if (items.len > 1) for (items.slice()[1..]) |*dir| dir.close();
         items.appendAssumeCapacity(target_dir);
 
-        var current_node = self.root.data.directory.?;
+        var current = 0;
+        var current_node = self.node(0);
 
         const lastItem = struct {
             fn f(array: anytype) ?@TypeOf(array.buffer[0]) {
@@ -364,44 +366,54 @@ pub const NarArchive = struct {
         }.f;
 
         while (lastItem(items)) |cwd| {
-            if (std.mem.indexOfScalar(u8, current_node.entry.?.name, 0) != null)
+            const name = self.nameString(current);
+            if (std.mem.eql(u8, name, "..") or
+                std.mem.containsAtLeastScalar(u8, name, 1, '/'))
+                return error.MaliciousArchive;
+            if (std.mem.eql(u8, ".", name))
+                return error.MaliciousArchive;
+            if (std.mem.indexOfScalar(u8, name, 0) != null)
                 return error.MaliciousArchive;
             switch (current_node.data) {
-                .file => |metadata| {
+                .regular_file => |contents| {
                     try cwd.writeFile(.{
-                        .sub_path = current_node.entry.?.name,
-                        .data = metadata.contents,
-                        .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
+                        .sub_path = name,
+                        .data = contents,
+                        .flags = .{ .mode = 0o666 },
                     });
                 },
-                .symlink => |target| {
-                    cwd.deleteFile(current_node.entry.?.name) catch {};
-                    try cwd.symLink(target, current_node.entry.?.name, .{});
+                .executable_file => |contents| {
+                    try cwd.writeFile(.{
+                        .sub_path = name,
+                        .data = contents,
+                        .flags = .{ .mode = 0o666 },
+                    });
+                },
+                .symlink => {
+                    cwd.deleteFile(name) catch {};
+                    try cwd.symLink(self.symlinkString(current), name, .{});
                 },
                 .directory => |child| {
-                    if (std.mem.eql(u8, current_node.entry.?.name, "..") or
-                        std.mem.containsAtLeastScalar(u8, current_node.entry.?.name, 1, '/'))
-                        return error.MaliciousArchive;
-                    if (std.mem.eql(u8, ".", current_node.entry.?.name))
-                        return error.MaliciousArchive;
-                    if (std.mem.indexOfScalar(u8, current_node.entry.?.name, 0) != null)
-                        return error.MaliciousArchive;
-                    try cwd.makeDir(current_node.entry.?.name);
-                    if (child) |node| {
+                    try cwd.makeDir(name);
+                    if (child.index()) |child_index| {
                         try items.ensureUnusedCapacity(1);
-                        const next = try cwd.openDir(current_node.entry.?.name, .{});
+                        const next = try cwd.openDir(name, .{});
                         items.appendAssumeCapacity(next);
-                        current_node = node;
+                        current = child_index;
+                        current_node = self.node(child_index);
                         continue;
                     }
                 },
             }
-            while ((current_node.entry orelse return).next == null) {
-                current_node = current_node.entry.?.parent;
+            while (current_node.next.index() == null) {
+                if (current == 0) return;
+                current = current_node.parent;
+                current_node = self.node(current);
                 var dir = items.pop().?;
-                if (current_node.entry != null) dir.close();
+                if (current != 0) dir.close();
             }
-            current_node = current_node.entry.?.next.?;
+            current = current_node.next.index().?;
+            current_node = self.node(current);
         }
     }
 
@@ -410,9 +422,9 @@ pub const NarArchive = struct {
     }
 
     pub fn symlinkString(self: *NarArchive, node_index: u32) []u8 {
-        const node = self.current(node_index);
-        const index = node.data.symlink.index;
-        const len = node.data.symlink.len;
+        const node_ = self.node(node_index);
+        const index = node_.data.symlink.index;
+        const len = node_.data.symlink.len;
         return switch (len) {
             0 => unreachable, // Don't call this on the root node!
             1...64 => self.small_name_list.array_list.items[index][0..len],
@@ -422,9 +434,9 @@ pub const NarArchive = struct {
     }
 
     pub fn nameString(self: *NarArchive, node_index: u32) []u8 {
-        const node = self.current(node_index);
-        const index = node.name_index;
-        const len = node.name_len;
+        const node_ = self.node(node_index);
+        const index = node_.name_index;
+        const len = node_.name_len;
         return switch (len) {
             0 => unreachable, // Don't call this on the root node!
             1...64 => self.small_name_list.array_list.items[index][0..len],
@@ -434,24 +446,25 @@ pub const NarArchive = struct {
     }
 
     pub fn allocSymlink(self: *NarArchive, node_index: u32, target: []const u8) EncodeError!void {
-        self.node(node_index).data.symlink.index = switch (name.len) {
-            0 => return error.NameTooBig,
-            1...64 => try self.small_name_list.create(),
-            65...std.fs.max_path_bytes => try self.large_name_list.create(),
-            else => return error.NameTooBig,
+        self.node(node_index).data = .{ .symlink = undefined };
+        self.node(node_index).data.symlink.index = switch (target.len) {
+            0 => return error.NameTooLarge,
+            1...64 => try self.small_name_list.create(self.list_allocator),
+            65...std.fs.max_path_bytes => try self.large_name_list.create(self.list_allocator),
+            else => return error.NameTooLarge,
         };
-        self.node(node_index).data.symlink.len = name.len;
-        @memcpy(self.nameString(node_index), name);
+        self.node(node_index).data.symlink.len = @intCast(target.len);
+        @memcpy(self.symlinkString(node_index), target);
     }
 
     pub fn allocName(self: *NarArchive, node_index: u32, name: []const u8) EncodeError!void {
         self.node(node_index).name_index = switch (name.len) {
-            0 => return error.NameTooBig,
-            1...64 => try self.small_name_list.create(),
-            65...std.fs.max_path_bytes => try self.large_name_list.create(),
-            else => return error.NameTooBig,
+            0 => return error.NameTooLarge,
+            1...64 => try self.small_name_list.create(self.list_allocator),
+            65...std.fs.max_path_bytes => try self.large_name_list.create(self.list_allocator),
+            else => return error.NameTooLarge,
         };
-        self.node(node_index).name_len = name.len;
+        self.node(node_index).name_len = @intCast(name.len);
         @memcpy(self.nameString(node_index), name);
     }
 
@@ -481,7 +494,7 @@ pub fn MemoryPoolIndex(comptime T: type, comptime alignment: ?std.mem.Alignment)
             else {
                 _ = try self.array_list.addOne(allocator);
                 try self.free_list.ensureTotalCapacity(allocator, self.array_list.items.len);
-                return @intCast(self.array_list.item.len - 1);
+                return @intCast(self.array_list.items.len - 1);
             }
         }
 
@@ -503,148 +516,71 @@ pub fn MemoryPoolIndex(comptime T: type, comptime alignment: ?std.mem.Alignment)
 /// memory-efficient than calling `fromDirectory` followed by `dump`.
 pub fn dumpDirectory(
     allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
     root_dir: std.fs.Dir,
-    writer: anytype,
 ) !void {
-    const NamedObject = struct {
-        name: [std.fs.max_path_bytes]u8 = undefined,
-        object: Object,
-    };
-
-    const ObjectIterator = struct {
-        current: ?*Object = null,
-
-        const Self = @This();
-
-        fn next(self: *Self) ?*Object {
-            const ret = self.current;
-
-            if (ret) |cur| self.current = cur.entry.?.next;
-            return ret;
-        }
-    };
+    var archive: NarArchive = .{ .list_allocator = allocator, .file_contents_arena = .init(allocator) };
 
     try writeTokens(writer, &.{ .magic, .directory });
 
-    var iterators: std.BoundedArray(struct {
-        dir_iter: std.fs.Dir.Iterator,
-        object: *NamedObject,
-        object_iter: ObjectIterator = .{},
-    }, 256) = .{};
-    defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
+    var iterators: std.BoundedArray(std.fs.Dir.Iterator, 256) = .{};
+    defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir.close();
 
-    var objects = std.heap.MemoryPool(NamedObject).init(allocator);
-    defer objects.deinit();
+    iterators.appendAssumeCapacity(root_dir.iterate());
 
-    const root_object = try objects.create();
+    const parent = try archive.node_list.create(allocator);
+    std.debug.assert(parent == 0);
+    var parent_node = archive.node(parent);
 
-    root_object.object = .{
-        .entry = null,
-        .data = .{ .directory = null },
-    };
-
-    iterators.appendAssumeCapacity(.{
-        .dir_iter = root_dir.iterate(),
-        .object = root_object,
-    });
-
-    next_dir: while (true) {
-        var cur = &iterators.buffer[iterators.len - 1];
-
-        if (cur.object_iter.current == null) while (try cur.dir_iter.next()) |entry| {
-            const next_object = try objects.create();
-
-            @memcpy(next_object.name[0..entry.name.len], entry.name);
-            next_object.object = .{
-                .entry = .{
-                    .parent = &cur.object.object,
-                    .name = next_object.name[0..entry.name.len],
-                },
-                .data = switch (entry.kind) {
-                    .directory => .{ .directory = null },
-                    .sym_link => .{ .symlink = undefined },
-                    else => .{ .file = undefined },
-                },
+    while (true) {
+        const current_iter = &iterators.slice()[iterators.len - 1];
+        var prev: ?u32 = null;
+        while (try current_iter.next()) |entry| {
+            const next = try archive.node_list.create(allocator);
+            if (prev) |p|
+                archive.node(p).next = .from(next)
+            else
+                parent_node.data.directory = .from(next);
+            archive.node(next).* = .{
+                .parent = parent,
+                .prev = undefined,
+                .name_index = undefined,
+                .name_len = undefined,
+                .data = undefined,
             };
-
-            try cur.object.object.insertChild(&next_object.object);
-
-            cur.object_iter.current = cur.object.object.data.directory;
-        };
-
-        while (cur.object_iter.next()) |object| {
-            try writeTokens(writer, &.{.directory_entry});
-            try strWriter(object.entry.?.name, writer);
-            try writeTokens(writer, &.{.directory_entry_inner});
-
-            switch (object.data) {
-                .directory => {
-                    try writeTokens(writer, &.{.directory});
-                    try iterators.ensureUnusedCapacity(1);
-                    const next_dir = try cur.dir_iter.dir.openDir(object.entry.?.name, .{ .iterate = true });
-
-                    const next = iterators.addOneAssumeCapacity();
-                    next.* = .{
-                        .object = @fieldParentPtr("object", object),
-                        .dir_iter = next_dir.iterateAssumeFirstIteration(),
-                    };
-                    continue :next_dir;
-                },
-                .file => {
-                    const stat = try cur.dir_iter.dir.statFile(object.entry.?.name);
-                    try writeTokens(writer, &.{.file});
-                    if (stat.mode & 0o111 != 0) try writeTokens(writer, &.{.executable_file});
-                    try writeTokens(writer, &.{.file_contents});
-
-                    try writer.writeInt(u64, stat.size, .little);
-                    var left = stat.size;
-
-                    var file = try cur.dir_iter.dir.openFile(object.entry.?.name, .{});
-                    defer file.close();
-
-                    while (left != 0) {
-                        var buf: [4096 * 8]u8 = undefined;
-                        const read = try file.read(&buf);
-                        try writer.writeAll(buf[0..read]);
-                        left -= read;
-                    }
-
-                    const zeroes: [8]u8 = .{0} ** 8;
-                    try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);
-                },
-                .symlink => {
+            try archive.allocName(next, entry.name);
+            switch (entry.kind) {
+                .sym_link => {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
-                    try writeTokens(writer, &.{.symlink});
-
-                    const link = try cur.dir_iter.dir.readLink(object.entry.?.name, &buf);
-
-                    try strWriter(link, writer);
+                    const link = try current_iter.dir.readLink(entry.name, &buf);
+                    try archive.allocSymlink(next, link);
+                },
+                .directory => archive.node(next).data = .{ .directory = .from(null) },
+                else => {
+                    const stat = try current_iter.dir.statFile(entry.name);
+                    archive.node(next).data = if (stat.mode & 0o111 == 0)
+                        .{ .regular_file = undefined }
+                    else
+                        .{ .executable_file = undefined };
                 },
             }
-            try writeTokens(writer, &.{.directory_entry_end});
-            objects.destroy(@fieldParentPtr("object", object));
-        } else while (cur.object_iter.current == null) {
-            if (cur.object.object.entry == null) break :next_dir;
-            try writeTokens(writer, &.{.directory_entry_end});
-            cur.dir_iter.dir.close();
-
-            objects.destroy(cur.object);
-            _ = iterators.pop().?;
-
-            cur = &iterators.buffer[iterators.len - 1];
+            prev = next;
         }
+
+        @panic("TODO: finish dumpDirectory");
     }
-    try writeTokens(writer, &.{.archive_end});
 }
 
 /// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
 /// memory-efficient than calling `fromFileContents` followed by `dump`.
-pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
+pub fn dumpFile(writer: *std.Io.Writer, file: std.fs.File, executable: ?bool) !void {
     const stat = try file.stat();
     const is_executable = executable orelse (stat.mode & 0o111 != 0);
-    try writeTokens(writer, &.{ .magic, .file });
-    if (is_executable) try writeTokens(writer, &.{.executable_file});
-    try writeTokens(writer, &.{.file_contents});
+    try writeTokens(writer, &.{.magic});
+    if (is_executable)
+        try writeTokens(writer, &.{.executable_file})
+    else
+        try writeTokens(writer, &.{.regular_file});
 
     try writer.writeInt(u64, stat.size, .little);
 
@@ -664,9 +600,9 @@ pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
     try writeTokens(writer, &.{.archive_end});
 }
 
-pub fn dumpSymlink(target: []const u8, writer: anytype) !void {
+pub fn dumpSymlink(writer: *std.Io.Writer, target: []const u8) !void {
     try writeTokens(writer, &.{ .magic, .symlink });
-    try strWriter(target, writer);
+    try strWriter(writer, target);
     try writeTokens(writer, &.{.archive_end});
 }
 
@@ -696,7 +632,7 @@ pub const Object = struct {
         }
 
         pub fn index(self: Index) ?u32 {
-            return if (self) |i| @intFromEnum(i) else null;
+            return if (self != @as(Index, @enumFromInt(0))) @intFromEnum(self) else null;
         }
     };
 
@@ -832,7 +768,7 @@ fn expectToken(slice: *[]u8, comptime token: Token) !void {
     }
 }
 
-fn writeTokens(writer: anytype, comptime tokens: []const Token) !void {
+fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
     comptime var concatenated: []const u8 = "";
 
     comptime {
@@ -873,7 +809,7 @@ fn unstr(slice: *[]u8) EncodeError![]u8 {
     return result;
 }
 
-fn strWriter(string: []const u8, writer: anytype) !void {
+fn strWriter(writer: *std.Io.Writer, string: []const u8) !void {
     var buffer: [8]u8 = undefined;
     mem.writeInt(u64, &buffer, string.len, .little);
 
