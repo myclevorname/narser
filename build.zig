@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const use_llvm = b.option(bool, "use-llvm", "Use the LLVM backend");
@@ -43,6 +43,15 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const test_fmt = b.addFmt(.{
+        .paths = &.{ "src/root.zig", "src/main.zig", "build.zig" },
+        .check = true,
+    });
+
+    try test_fmt.step.addWatchInput(b.path("build.zig"));
+    try test_fmt.step.addWatchInput(b.path("src/main.zig"));
+    try test_fmt.step.addWatchInput(b.path("src/root.zig"));
+
     const narser_unit_tests = b.addTest(.{
         .root_module = narser,
     });
@@ -58,4 +67,5 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_narser_unit_tests.step);
+    test_step.dependOn(&test_fmt.step);
 }
