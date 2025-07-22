@@ -111,7 +111,7 @@ pub const NarArchive = struct {
                 // there must be a child at this point
 
                 const child = try self.node_list.create(allocator);
-                self.node(current).data.directory = .from(child);
+                self.node(current).data = .{ .directory = .from(child) };
                 self.node(child).* = .{
                     .parent = current,
                     .name_index = undefined,
@@ -201,11 +201,10 @@ pub const NarArchive = struct {
 
         errdefer if (iters.len > 1) for (iters.slice()[1..]) |*x| x.dir.close();
 
-        while (iters.len != 0) {
+        loop: while (iters.len != 0) {
             var cur = &iters.slice()[iters.len - 1];
-            const entry = try cur.next();
 
-            if (entry) |e| {
+            while (try cur.next()) |e| {
                 const next = try self.node_list.create(allocator);
                 self.node(next).* = .{
                     .parent = current,
@@ -214,13 +213,15 @@ pub const NarArchive = struct {
                     .data = undefined,
                 };
                 try self.allocName(next, e.name);
+                try self.insertChild(current, next);
                 switch (e.kind) {
                     .directory => {
                         self.node(next).data = .{ .directory = .from(null) };
                         var child = try cur.dir.openDir(e.name, .{ .iterate = true });
                         errdefer child.close();
-                        iters.append(child.iterate()) catch return error.NestedTooDeep;
+                        iters.append(child.iterateAssumeFirstIteration()) catch return error.NestedTooDeep;
                         current = next;
+                        continue :loop;
                     },
                     .sym_link => {
                         self.node(next).data = .{ .symlink = undefined };
@@ -245,7 +246,6 @@ pub const NarArchive = struct {
                         };
                     },
                 }
-                try self.insertChild(current, next);
             } else {
                 current = self.node(current).parent;
                 if (iters.len > 1) cur.dir.close();
@@ -422,35 +422,82 @@ pub const NarArchive = struct {
     }
 
     pub fn insertChild(self: *NarArchive, parent: u32, child: u32) error{DuplicateObjectName}!void {
-        if (self.data.directory) |first|
-            switch (mem.order(u8, first.entry.?.name, child.entry.?.name)) {
+        if (self.node(parent).data.directory.index()) |first|
+            switch (mem.order(u8, self.nameString(first), self.nameString(child))) {
                 .lt => {
                     var left = first;
-                    while (left.entry.?.next != null and mem.order(u8, left.entry.?.name, child.entry.?.name) == .lt) {
-                        left = left.entry.?.next.?;
-                    } else switch (mem.order(u8, left.entry.?.name, child.entry.?.name)) {
+                    while (self.node(left).next.index() != null and
+                        std.mem.order(u8, self.nameString(left), self.nameString(child)) == .lt)
+                    {
+                        left = self.node(left).next.index().?;
+                    } else switch (mem.order(u8, self.nameString(left), self.nameString(child))) {
                         .eq => return error.DuplicateObjectName,
                         .lt => {
-                            left.entry.?.next = child;
-                            child.entry.?.prev = left;
+                            self.node(left).next = .from(child);
+                            self.node(child).prev = .from(left);
                         },
                         .gt => {
-                            child.entry.?.prev = left.entry.?.prev;
-                            child.entry.?.next = left;
-                            if (left.entry.?.prev) |p| p.entry.?.next = child;
-                            left.entry.?.prev = child;
+                            self.node(child).prev = self.node(left).prev;
+                            self.node(child).next = .from(left);
+                            if (self.node(left).prev.index()) |p| self.node(p).next = .from(child);
+                            self.node(left).prev = .from(child);
                         },
                     }
                 },
                 .eq => return error.DuplicateObjectName,
                 .gt => {
-                    first.entry.?.prev = child;
-                    child.entry.?.next = first;
-                    self.data.directory = child;
+                    self.node(first).prev = .from(child);
+                    self.node(child).next = .from(first);
+                    self.node(parent).data.directory = .from(child);
                 },
             }
         else
-            self.data.directory = child;
+            self.node(parent).data.directory = .from(child);
+    }
+
+    /// Traverses an Object, following symbolic links.
+    pub fn subPath(self: *NarArchive, base: u32, subpath: []const u8) !u32 {
+        var cur = base;
+        var parts: std.BoundedArray([]const u8, 4096) = .{};
+        parts.appendAssumeCapacity(subpath);
+
+        comptime std.debug.assert(std.fs.path.sep == '/');
+        while (parts.pop()) |full_first_path| {
+            const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
+            const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
+            const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
+            if (rest.len != 0) parts.appendAssumeCapacity(rest);
+
+            if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
+            if (std.mem.eql(u8, first, "..")) {
+                cur = self.node(cur).parent; // the parent of the root node is always the root node
+                continue;
+            }
+
+            cur = if (self.node(cur).data == .directory)
+                self.node(cur).data.directory.index() orelse return error.FileNotFound
+            else
+                return error.NotADir;
+            find: while (true) {
+                switch (std.mem.order(u8, self.nameString(cur), first)) {
+                    .lt => {},
+                    .eq => break :find,
+                    .gt => return error.FileNotFound,
+                }
+                cur = self.node(cur).next.index() orelse return error.FileNotFound;
+            }
+            switch (self.node(cur).data) {
+                .directory => {},
+                .regular_file, .executable_file => if (parts.len != 0) return error.IsFile,
+                .symlink => {
+                    const target = self.symlinkString(cur);
+                    if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
+                    try parts.append(target);
+                    cur = self.node(cur).parent;
+                },
+            }
+        }
+        return cur;
     }
 
     pub fn node(self: *NarArchive, index: u32) *Object {
@@ -568,6 +615,13 @@ pub fn dumpDirectory(
     std.debug.assert(parent == 0);
     var parent_node = archive.node(parent);
 
+    parent_node.* = .{
+        .parent = 0,
+        .name_index = 0,
+        .name_len = 0,
+        .data = .{ .directory = .from(null) },
+    };
+
     while (true) {
         const current_iter = &iterators.slice()[iterators.len - 1];
         var prev: ?u32 = null;
@@ -671,50 +725,6 @@ pub const Object = struct {
             return if (self != @as(Index, @enumFromInt(0))) @intFromEnum(self) else null;
         }
     };
-
-    /// Traverses an Object, following symbolic links.
-    pub fn subPath(self: *Object, subpath: []const u8) !*Object {
-        var cur = self;
-        var parts: std.BoundedArray([]const u8, 4096) = .{};
-        parts.appendAssumeCapacity(subpath);
-
-        comptime std.debug.assert(std.fs.path.sep == '/');
-        while (parts.pop()) |full_first_path| {
-            const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
-            const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
-            const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
-            if (rest.len != 0) parts.appendAssumeCapacity(rest);
-
-            if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
-            if (std.mem.eql(u8, first, "..")) {
-                if (cur.entry) |entry| cur = entry.parent;
-                continue;
-            }
-
-            cur = if (cur.data == .directory)
-                cur.data.directory orelse return error.FileNotFound
-            else
-                @panic(cur.entry.?.name);
-            find: while (true) {
-                switch (std.mem.order(u8, cur.entry.?.name, first)) {
-                    .lt => {},
-                    .eq => break :find,
-                    .gt => return error.FileNotFound,
-                }
-                cur = cur.entry.?.next orelse return error.FileNotFound;
-            }
-            switch (cur.data) {
-                .directory => {},
-                .file => if (parts.len != 0) return error.IsFile,
-                .symlink => |target| {
-                    if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
-                    try parts.append(target);
-                    cur = cur.entry.?.parent;
-                },
-            }
-        }
-        return cur;
-    }
 };
 
 pub const EncodeError = std.mem.Allocator.Error || error{
@@ -745,7 +755,7 @@ const token_map = std.StaticStringMap(Token).initComptime(.{
     .{ str("type") ++ str("directory"), .directory },
     .{ str("type") ++ str("regular") ++ str("contents"), .regular_file },
     .{ str("type") ++ str("symlink") ++ str("target"), .symlink },
-    .{ str("type") ++ str("regular") ++ str("") ++ str("executable") ++ str(""), .executable_file },
+    .{ str("type") ++ str("regular") ++ str("executable") ++ str("") ++ str("contents"), .executable_file },
     .{ str("entry") ++ str("(") ++ str("name"), .directory_entry },
     .{ str(")") ++ str(")"), .directory_entry_end },
     .{ str("node") ++ str("("), .directory_entry_inner },
@@ -869,11 +879,11 @@ test "a file, a directory, and some more files" {
 
     const file2 = data.node(dir).data.directory.index().?;
     try expectEqualStrings("file2", data.nameString(file2));
-    try expectEqualStrings("bye\n", data.node(file2).data.regular_file);
+    try expectEqualStrings("bye\n", data.node(file2).data.executable_file);
 
     const file3 = data.node(file2).next.index().?;
     try expectEqualStrings("file3", data.nameString(file3));
-    try expectEqualStrings("nevermind\n", data.node(file3).data.executable_file);
+    try expectEqualStrings("nevermind\n", data.node(file3).data.regular_file);
     try expectEqual(null, data.node(file3).next.index());
 }
 
@@ -938,7 +948,10 @@ test "nar to directory to nar" {
     var buffer: [2 * expected.len]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
 
-    try data.dump(stream.writer());
+    var new_writer = stream.writer().adaptToNewApi();
+    const writer = &new_writer.new_interface;
+
+    try data.dump(writer);
 
     try std.testing.expectEqualSlices(u8, expected, stream.getWritten());
 }
@@ -955,7 +968,9 @@ test "more complex" {
         @embedFile("tests/complex_empty.nar") ** 2;
 
     var array: std.BoundedArray(u8, 2 * expected.len) = .{};
-    const writer = array.writer();
+    const generic_writer = array.writer();
+    var new_writer = generic_writer.adaptToNewApi();
+    const writer = &new_writer.new_interface;
 
     {
         try dumpDirectory(allocator, writer, root);
@@ -976,7 +991,7 @@ test "more complex" {
         var empty = try root.openDir("empty", .{ .iterate = true });
         defer empty.close();
 
-        try dumpDirectory(writer, allocator, empty);
+        try dumpDirectory(allocator, writer, empty);
 
         var archive = try NarArchive.fromDirectory(allocator, empty);
         defer archive.deinit();
