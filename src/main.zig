@@ -10,9 +10,9 @@ const help_message =
     \\
     \\Options:
     \\    -h, -?  Display this help message
-    \\    -l, -L  Long listing (ls only)
-    \\    -r, -R  Recurse (ls only)
-    \\    -x      Standard input is executable (pack only)
+    \\    -l, -L  Long listing (ls)
+    \\    -r, -R  Recurse (ls)
+    \\    -x      Standard input is executable (pack, hash)
     \\
     \\Commands:
     \\    unpack <ARCHIVE> <PATH>
@@ -37,11 +37,14 @@ const help_message =
     \\        assumed to be a file archive. If ARCHIVE is omitted, then the archive is
     \\        read from standard input.
     \\
+    \\    hash [PATH]
+    \\        Encode PATH as a Nix archive and prints its SRI hash to standard output.
+    \\        If PATH is omitted, read from standard input as a file.
 ;
 
 const LsOptions = struct { long: bool, recursive: bool };
 
-pub fn ls(archive: *const narser.NarArchive, writer: anytype, opts: LsOptions) !void {
+pub fn ls(archive: *const narser.NarArchive, writer: *std.Io.Writer, opts: LsOptions) !void {
     var node = archive.root;
 
     if (opts.long) switch (node.data) {
@@ -68,7 +71,7 @@ pub fn ls(archive: *const narser.NarArchive, writer: anytype, opts: LsOptions) !
     }
 }
 
-fn printPath(node: *const narser.Object, writer: anytype, long: bool) !void {
+fn printPath(node: *const narser.Object, writer: *std.Io.Writer, long: bool) !void {
     if (long) switch (node.data) {
         .directory => try writer.writeAll("dr-xr-xr-x                    0 "),
         .symlink => try writer.writeAll("lrwxrwxrwx                    0 "),
@@ -172,11 +175,10 @@ const OptsIter = struct {
 };
 
 pub fn main() !void {
-    const stdout = std.io.getStdOut();
-    var bw = std.io.bufferedWriter(stdout.writer());
-    defer bw.flush() catch @panic("Failed to fully flush stdout buffer");
-
-    const writer = bw.writer();
+    const stdout = std.fs.File.stdout();
+    var stdout_buffer: [4096]u8 = undefined;
+    var fw = stdout.writer(&stdout_buffer);
+    var writer = &fw.interface;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -210,18 +212,27 @@ pub fn main() !void {
         .argument => |str| try processed_args.append(str),
     };
 
-    if (opts.show_help or processed_args.items.len == 0) return try writer.writeAll(help_message);
+    if (opts.show_help or processed_args.items.len == 0) {
+        try writer.writeAll(help_message);
+        try writer.flush();
+        return;
+    }
 
     const command = processed_args.items[0];
-    if (std.mem.eql(u8, "pack", command)) {
+    if (std.mem.eql(u8, "pack", command) or std.mem.eql(u8, "hash", command)) {
+        const use_hasher = std.mem.eql(u8, "hash", command);
+        var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
+        var hash_upd = hasher.writer().adaptToNewApi();
+        const used_writer = if (use_hasher) &hash_upd.new_interface else writer;
+
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
-            try narser.dumpFile(std.io.getStdIn(), opts.executable, writer);
+            try narser.dumpFile(std.fs.File.stdin(), opts.executable, used_writer);
         } else {
             var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
             if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
-                try narser.dumpSymlink(target, writer);
+                try narser.dumpSymlink(target, used_writer);
             } else |_| {
                 const stat = try std.fs.cwd().statFile(argument);
                 switch (stat.kind) {
@@ -229,15 +240,24 @@ pub fn main() !void {
                     .directory => {
                         var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
                         defer dir.close();
-                        try narser.dumpDirectory(allocator, dir, writer);
+                        try narser.dumpDirectory(allocator, dir, used_writer);
                     },
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
-                        try narser.dumpFile(file, null, writer);
+                        try narser.dumpFile(file, null, used_writer);
                     },
                 }
             }
+        }
+
+        if (use_hasher) {
+            const sha256_hash = hasher.finalResult();
+            var base64_hash: [44]u8 = undefined;
+
+            _ = std.base64.standard.Encoder.encode(&base64_hash, &sha256_hash);
+
+            try writer.print("sha256-{s}\n", .{base64_hash});
         }
     } else if (std.mem.eql(u8, "ls", command)) {
         var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
@@ -322,4 +342,6 @@ pub fn main() !void {
                 fatal("Target path required", .{}),
         }
     } else fatal("Invalid command '{s}'", .{command});
+
+    try writer.flush();
 }

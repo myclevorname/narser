@@ -8,15 +8,6 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const mem = std.mem;
 const divCeil = std.math.divCeil;
 
-/// An alternative @alignOf and std.mem.Alignment.of that changes output based on compiler version.
-inline fn alignOf(comptime T: type) @typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.? {
-    return switch (@typeInfo(@TypeOf(std.ArrayListAligned)).@"fn".params[1].type.?) {
-        ?std.mem.Alignment => std.mem.Alignment.of(T),
-        ?u29 => @alignOf(T),
-        else => |x| @compileError("Expected ?std.mem.Alignment or ?u29, found \"" ++ @typeName(x) ++ "\""),
-    };
-}
-
 /// A Nix Archive file.
 ///
 /// Preconditions:
@@ -233,7 +224,7 @@ pub const NarArchive = struct {
                             e.name,
                             std.math.maxInt(usize),
                             std.math.cast(usize, stat.size) orelse std.math.maxInt(usize),
-                            alignOf(u8).?,
+                            .of(u8),
                             null,
                         );
                         next.data.file = .{
@@ -304,7 +295,7 @@ pub const NarArchive = struct {
     }
 
     /// Serialize a NarArchive into the writer.
-    pub fn dump(self: *const NarArchive, writer: anytype) !void {
+    pub fn dump(self: *const NarArchive, writer: *std.Io.Writer) !void {
         var node = self.root;
 
         try writeTokens(writer, &.{.magic});
@@ -414,7 +405,7 @@ pub const NarArchive = struct {
 pub fn dumpDirectory(
     allocator: std.mem.Allocator,
     root_dir: std.fs.Dir,
-    writer: anytype,
+    writer: *std.Io.Writer,
 ) !void {
     const NamedObject = struct {
         name: [std.fs.max_path_bytes]u8 = undefined,
@@ -549,7 +540,7 @@ pub fn dumpDirectory(
 
 /// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
 /// memory-efficient than calling `fromFileContents` followed by `dump`.
-pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
+pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: *std.Io.Writer) !void {
     const stat = try file.stat();
     const is_executable = executable orelse (stat.mode & 0o111 != 0);
     try writeTokens(writer, &.{ .magic, .file });
@@ -574,7 +565,7 @@ pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: anytype) !void {
     try writeTokens(writer, &.{.archive_end});
 }
 
-pub fn dumpSymlink(target: []const u8, writer: anytype) !void {
+pub fn dumpSymlink(target: []const u8, writer: *std.Io.Writer) !void {
     try writeTokens(writer, &.{ .magic, .symlink });
     try strWriter(target, writer);
     try writeTokens(writer, &.{.archive_end});
@@ -733,7 +724,7 @@ fn expectToken(slice: *[]u8, comptime token: Token) !void {
     }
 }
 
-fn writeTokens(writer: anytype, comptime tokens: []const Token) !void {
+fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
     comptime var concatenated: []const u8 = "";
 
     comptime {
@@ -774,7 +765,7 @@ fn unstr(slice: *[]u8) EncodeError![]u8 {
     return result;
 }
 
-fn strWriter(string: []const u8, writer: anytype) !void {
+fn strWriter(string: []const u8, writer: *std.Io.Writer) !void {
     var buffer: [8]u8 = undefined;
     mem.writeInt(u64, &buffer, string.len, .little);
 
@@ -904,8 +895,9 @@ test "nar to directory to nar" {
 
     var buffer: [2 * expected.len]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
+    var updated = stream.writer().adaptToNewApi();
 
-    try data.dump(stream.writer());
+    try data.dump(&updated.new_interface);
 
     try std.testing.expectEqualSlices(u8, expected, stream.getWritten());
 }
@@ -922,7 +914,8 @@ test "more complex" {
         @embedFile("tests/complex_empty.nar") ** 2;
 
     var array: std.BoundedArray(u8, 2 * expected.len) = .{};
-    const writer = array.writer();
+    var updated = array.writer().adaptToNewApi();
+    const writer = &updated.new_interface;
 
     {
         try dumpDirectory(allocator, root, writer);
