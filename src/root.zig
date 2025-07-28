@@ -1,5 +1,6 @@
 const std = @import("std");
 const tests_path = @import("tests").tests_path;
+const builtin = @import("builtin");
 
 const assert = std.debug.assert;
 const expect = std.testing.expect;
@@ -42,6 +43,7 @@ pub const NarArchive = struct {
         var stream = slice;
 
         var current = try self.node_list.create(allocator);
+        std.debug.assert(current == 0);
         var current_node = self.node(current);
         current_node.* = .{
             .parent = 0,
@@ -111,6 +113,7 @@ pub const NarArchive = struct {
                 // there must be a child at this point
 
                 const child = try self.node_list.create(allocator);
+                current_node = self.node(current);
                 self.node(current).data = .{ .directory = .from(child) };
                 self.node(child).* = .{
                     .parent = current,
@@ -147,9 +150,11 @@ pub const NarArchive = struct {
             .leave_directory => {
                 while (current != 0 and matches(&stream, .directory_entry_end)) {
                     current = self.node(current).parent;
+                    current_node = self.node(current);
                 } else {
                     if (current != 0 and matches(&stream, .directory_entry)) {
                         const next = try self.node_list.create(allocator);
+                        current_node = self.node(current);
                         self.node(current).next = .from(next);
                         self.node(next).* = .{
                             .parent = current_node.parent,
@@ -359,8 +364,8 @@ pub const NarArchive = struct {
         defer if (items.len > 1) for (items.slice()[1..]) |*dir| dir.close();
         items.appendAssumeCapacity(target_dir);
 
-        var current: u32 = 0;
-        var current_node = self.node(0);
+        var current: u32 = self.node(0).data.directory.index().?;
+        var current_node = self.node(current);
 
         const lastItem = struct {
             fn f(array: anytype) ?@TypeOf(array.buffer[0]) {
@@ -433,19 +438,23 @@ pub const NarArchive = struct {
                     } else switch (mem.order(u8, self.nameString(left), self.nameString(child))) {
                         .eq => return error.DuplicateObjectName,
                         .lt => {
+                            // ... <-> left ==> left <-> child
                             self.node(left).next = .from(child);
                             self.node(child).prev = .from(left);
                         },
                         .gt => {
-                            self.node(child).prev = self.node(left).prev;
+                            // ... <-> left ==> ... <-> child <-> left
+                            const new_left = self.node(left).prev;
+                            if (new_left.index()) |nl| self.node(nl).next = .from(child);
+                            self.node(child).prev = new_left;
                             self.node(child).next = .from(left);
-                            if (self.node(left).prev.index()) |p| self.node(p).next = .from(child);
                             self.node(left).prev = .from(child);
                         },
                     }
                 },
                 .eq => return error.DuplicateObjectName,
                 .gt => {
+                    // ! <-> first <-> ... ==> ! <-> child <-> first <-> ...
                     self.node(first).prev = .from(child);
                     self.node(child).next = .from(first);
                     self.node(parent).data.directory = .from(child);
@@ -582,6 +591,7 @@ pub fn MemoryPoolIndex(comptime T: type, comptime alignment: ?std.mem.Alignment)
         }
 
         pub fn destroy(self: *Self, index: u32) void {
+            self.node(index).* = undefined;
             try self.free_list.appendAssumeCapacity(index);
         }
 
@@ -602,63 +612,11 @@ pub fn dumpDirectory(
     writer: *std.Io.Writer,
     root_dir: std.fs.Dir,
 ) !void {
-    var archive: NarArchive = .{ .list_allocator = allocator, .file_contents_arena = .init(allocator) };
+    // TODO: rewrite it
+    var archive: NarArchive = try .fromDirectory(allocator, root_dir);
+    defer archive.deinit();
 
-    try writeTokens(writer, &.{ .magic, .directory });
-
-    var iterators: std.BoundedArray(std.fs.Dir.Iterator, 256) = .{};
-    defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir.close();
-
-    iterators.appendAssumeCapacity(root_dir.iterate());
-
-    const parent = try archive.node_list.create(allocator);
-    std.debug.assert(parent == 0);
-    var parent_node = archive.node(parent);
-
-    parent_node.* = .{
-        .parent = 0,
-        .name_index = 0,
-        .name_len = 0,
-        .data = .{ .directory = .from(null) },
-    };
-
-    while (true) {
-        const current_iter = &iterators.slice()[iterators.len - 1];
-        var prev: ?u32 = null;
-        while (try current_iter.next()) |entry| {
-            const next = try archive.node_list.create(allocator);
-            if (prev) |p|
-                archive.node(p).next = .from(next)
-            else
-                parent_node.data.directory = .from(next);
-            archive.node(next).* = .{
-                .parent = parent,
-                .prev = undefined,
-                .name_index = undefined,
-                .name_len = undefined,
-                .data = undefined,
-            };
-            try archive.allocName(next, entry.name);
-            switch (entry.kind) {
-                .sym_link => {
-                    var buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const link = try current_iter.dir.readLink(entry.name, &buf);
-                    try archive.allocSymlink(next, link);
-                },
-                .directory => archive.node(next).data = .{ .directory = .from(null) },
-                else => {
-                    const stat = try current_iter.dir.statFile(entry.name);
-                    archive.node(next).data = if (stat.mode & 0o111 == 0)
-                        .{ .regular_file = undefined }
-                    else
-                        .{ .executable_file = undefined };
-                },
-            }
-            prev = next;
-        }
-
-        @panic("TODO: finish dumpDirectory");
-    }
+    try archive.dump(writer);
 }
 
 /// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more

@@ -41,57 +41,61 @@ const help_message =
 
 const LsOptions = struct { long: bool, recursive: bool };
 
-pub fn ls(writer: *std.Io.Writer, archive: *const narser.NarArchive, opts: LsOptions) !void {
-    var node = archive.root;
+pub fn ls(writer: *std.Io.Writer, archive: *narser.NarArchive, root: u32, opts: LsOptions) !void {
+    var node = root;
 
-    if (opts.long) switch (node.data) {
+    if (opts.long) switch (archive.node(root).data) {
         .directory => {},
-        .file, .symlink => return try printPath(node, writer, true),
-    } else switch (node.data) {
+        .regular_file, .executable_file, .symlink => return try printPath(writer, archive, root, root, true),
+    } else switch (archive.node(root).data) {
         .directory => {},
-        .file, .symlink => return try writer.writeAll("\n"),
+        .regular_file, .executable_file, .symlink => return try writer.writeAll("\n"),
     }
 
-    node = node.data.directory orelse return;
+    node = archive.node(node).data.directory.index() orelse return;
 
-    while (true) {
-        try printPath(node, writer, opts.long);
+    while (node != root) {
+        try printPath(writer, archive, root, node, opts.long);
 
-        if (opts.recursive and node.data == .directory and node.data.directory != null) {
-            node = node.data.directory.?;
+        if (opts.recursive and archive.node(node).data == .directory and archive.node(node).data.directory.index() != null) {
+            node = archive.node(node).data.directory.index().?;
         } else {
-            while ((node.entry orelse return).next == null) {
-                node = node.entry.?.parent;
+            while (node != root and archive.node(node).next.index() == null) {
+                node = archive.node(node).parent;
             }
-            node = node.entry.?.next.?;
+            if (node == root) break;
+            node = archive.node(node).next.index().?;
         }
     }
 }
 
-fn printPath(writer: *std.Io.Writer, node: *const narser.Object, long: bool) !void {
-    if (long) switch (node.data) {
+fn printPath(writer: *std.Io.Writer, archive: *narser.NarArchive, root: u32, sub: u32, long: bool) !void {
+    if (long) switch (archive.node(sub).data) {
         .directory => try writer.writeAll("dr-xr-xr-x                    0 "),
         .symlink => try writer.writeAll("lrwxrwxrwx                    0 "),
-        .file => |metadata| {
-            try writer.writeAll(if (metadata.is_executable) "-r-xr-xr-x" else "-r--r--r--");
+        .regular_file => |contents| {
+            try writer.writeAll("-r--r--r--");
+            const spaces: [21]u8 = .{' '} ** (31 - "-r--r--r--".len);
+            const len_size = if (contents.len == 0) 1 else 1 + std.math.log10_int(contents.len);
+            try writer.print("{s}{} ", .{ spaces[len_size..], contents.len });
+        },
+        .executable_file => |contents| {
+            try writer.writeAll("-r-xr-xr-x");
             const spaces: [21]u8 = .{' '} ** (31 - "-r-xr-xr-x".len);
-            const len_size = if (metadata.contents.len == 0) 1 else 1 + std.math.log10_int(metadata.contents.len);
-            try writer.print("{s}{} ", .{ spaces[len_size..], metadata.contents.len });
+            const len_size = if (contents.len == 0) 1 else 1 + std.math.log10_int(contents.len);
+            try writer.print("{s}{} ", .{ spaces[len_size..], contents.len });
         },
     };
 
-    var cur: ?*const narser.Object = node;
-    var buf: [max_depth][]u8 = undefined;
-    const count: usize = blk: for (0..max_depth) |i| {
-        if (cur) |x| {
-            buf[i] = if (x.entry) |e| e.name else "";
-            cur = if (x.entry) |e| e.parent else null;
-        } else break :blk i;
-    } else return error.OutOfMemory;
+    var cur: u32 = sub;
+    var buf: std.BoundedArray([]u8, max_depth) = .{};
+    while (cur != root) {
+        buf.append(archive.nameString(cur)) catch return error.NestedTooDeep;
+        cur = archive.node(cur).parent;
+    }
+    var iter = std.mem.reverseIterator(buf.slice());
 
-    var iter = std.mem.reverseIterator(buf[0 .. count - 1]);
-
-    if (count != 1) {
+    if (buf.len > 0) {
         try writer.print(".", .{});
 
         while (iter.next()) |x| {
@@ -99,7 +103,7 @@ fn printPath(writer: *std.Io.Writer, node: *const narser.Object, long: bool) !vo
         }
     }
 
-    if (long and node.data == .symlink) try writer.print(" -> {s}", .{node.data.symlink});
+    if (long and archive.node(sub).data == .symlink) try writer.print(" -> {s}", .{archive.symlinkString(sub)});
 
     try writer.print("\n", .{});
 }
@@ -176,7 +180,6 @@ pub fn main() !void {
     var buf: [4096]u8 = undefined;
     var fw = stdout.writer(&buf);
     var writer = &fw.interface;
-    defer writer.flush() catch @panic("Failed to fully flush stdout buffer");
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -210,118 +213,126 @@ pub fn main() !void {
         .argument => |str| try processed_args.append(str),
     };
 
-    if (opts.show_help or processed_args.items.len == 0) return try writer.writeAll(help_message);
+    if (opts.show_help or processed_args.items.len == 0)
+        try writer.writeAll(help_message)
+    else {
+        const command = processed_args.items[0];
+        if (std.mem.eql(u8, "pack", command)) {
+            const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
+            if (std.mem.eql(u8, "-", argument)) {
+                try narser.dumpFile(writer, std.fs.File.stdin(), opts.executable);
+            } else {
+                var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
-    const command = processed_args.items[0];
-    if (std.mem.eql(u8, "pack", command)) {
-        const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
-        if (std.mem.eql(u8, "-", argument)) {
-            try narser.dumpFile(writer, std.fs.File.stdin(), opts.executable);
-        } else {
-            var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
-
-            if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
-                try narser.dumpSymlink(writer, target);
-            } else |_| {
-                const stat = try std.fs.cwd().statFile(argument);
-                switch (stat.kind) {
-                    .sym_link => fatal("Failed to read the symlink target", .{}),
-                    .directory => {
-                        var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
-                        defer dir.close();
-                        try narser.dumpDirectory(allocator, writer, dir);
-                    },
-                    else => {
-                        var file = try std.fs.cwd().openFile(argument, .{});
-                        defer file.close();
-                        try narser.dumpFile(writer, file, null);
-                    },
+                if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
+                    try narser.dumpSymlink(writer, target);
+                } else |_| {
+                    const stat = try std.fs.cwd().statFile(argument);
+                    switch (stat.kind) {
+                        .sym_link => fatal("Failed to read the symlink target", .{}),
+                        .directory => {
+                            var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
+                            defer dir.close();
+                            try narser.dumpDirectory(allocator, writer, dir);
+                        },
+                        else => {
+                            var file = try std.fs.cwd().openFile(argument, .{});
+                            defer file.close();
+                            try narser.dumpFile(writer, file, null);
+                        },
+                    }
                 }
             }
-        }
-    } else if (std.mem.eql(u8, "ls", command)) {
-        var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
-        if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
-        const contents = try std.fs.cwd().readFileAlloc(
-            allocator,
-            argument,
-            std.math.maxInt(usize),
-        );
-        defer allocator.free(contents);
+        } else if (std.mem.eql(u8, "ls", command)) {
+            var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
+            if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
+            const contents = try std.fs.cwd().readFileAlloc(
+                allocator,
+                argument,
+                std.math.maxInt(usize),
+            );
+            defer allocator.free(contents);
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
-        defer archive.deinit();
+            var archive = try narser.NarArchive.fromSlice(allocator, contents);
+            defer archive.deinit();
 
-        const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
-        archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.IsFile => fatal("In archive: expected directory, found file", .{}),
-            error.FileNotFound => fatal("In archive: file not found", .{}),
-            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.Overflow => fatal("Too many nested symlinks", .{}),
-        };
-        archive.root.entry = null;
-        try ls(writer, &archive, .{ .recursive = opts.recurse, .long = opts.long_listing });
-    } else if (std.mem.eql(u8, "cat", command)) {
-        var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
-        if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
-        const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
+            const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
+            const sub = archive.subPath(0, subpath) catch |e| switch (e) {
+                error.IsFile => fatal("In archive: expected directory, found file", .{}),
+                error.FileNotFound => fatal("In archive: file not found", .{}),
+                error.NotADir => fatal("In archive: Part of the subpath is a file", .{}),
+                error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+                error.Overflow => fatal("Too many nested symlinks", .{}),
+            };
+            try ls(writer, &archive, sub, .{ .recursive = opts.recurse, .long = opts.long_listing });
+        } else if (std.mem.eql(u8, "cat", command)) {
+            var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
+            if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
+            const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
-        const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
-        defer allocator.free(contents);
+            const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
+            defer allocator.free(contents);
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
-        defer archive.deinit();
+            var archive = try narser.NarArchive.fromSlice(allocator, contents);
+            defer archive.deinit();
 
-        switch (archive.root.data) {
-            .directory => |child| if (child == null) fatal("Archive is an empty directory", .{}),
-            .file => {},
-            .symlink => fatal("narser does not support following symbolic links to the filesystem", .{}),
-        }
+            switch (archive.node(0).data) {
+                .directory => |child| if (child.index() == null) fatal("Archive is an empty directory", .{}),
+                .regular_file, .executable_file => {},
+                .symlink => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            }
 
-        const sub = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.IsFile => fatal("In archive: expected directory, found file", .{}),
-            error.FileNotFound => fatal("In archive: file not found", .{}),
-            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.Overflow => fatal("Too many nested symlinks", .{}),
-        };
+            const sub = archive.subPath(0, subpath) catch |e| switch (e) {
+                error.IsFile => fatal("In archive: expected directory, found file", .{}),
+                error.FileNotFound => fatal("In archive: file not found", .{}),
+                error.NotADir => fatal("In archive: Part of the subpath is a file", .{}),
+                error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+                error.Overflow => fatal("Too many nested symlinks", .{}),
+            };
 
-        switch (sub.data) {
-            .file => |metadata| try writer.writeAll(metadata.contents),
-            .symlink => unreachable,
-            .directory => fatal("In archive: expected file, found directory", .{}),
-        }
-    } else if (std.mem.eql(u8, "unpack", command)) {
-        var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
-        if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
+            switch (archive.node(sub).data) {
+                .regular_file, .executable_file => |cat_contents| try writer.writeAll(cat_contents),
+                .symlink => unreachable,
+                .directory => fatal("In archive: expected file, found directory", .{}),
+            }
+        } else if (std.mem.eql(u8, "unpack", command)) {
+            var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
+            if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
 
-        const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
-        defer allocator.free(contents);
+            const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
+            defer allocator.free(contents);
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
-        defer archive.deinit();
+            var archive = try narser.NarArchive.fromSlice(allocator, contents);
+            defer archive.deinit();
 
-        const target_path = if (processed_args.items.len < 3) null else processed_args.items[2];
+            const target_path = if (processed_args.items.len < 3) null else processed_args.items[2];
 
-        switch (archive.root.data) {
-            .directory => {
-                var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
-                defer dir.close();
-                try archive.unpackDir(dir);
-            },
-            .file => |metadata| if (target_path == null or std.mem.eql(u8, "-", target_path.?))
-                try writer.writeAll(metadata.contents)
-            else
-                try std.fs.cwd().writeFile(.{
-                    .sub_path = target_path.?,
-                    .data = metadata.contents,
-                    .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
-                }),
-            .symlink => |target| if (target_path) |path|
-                try std.fs.cwd().symLink(target, path, .{})
-            else
-                fatal("Target path required", .{}),
-        }
-    } else fatal("Invalid command '{s}'", .{command});
+            switch (archive.node(0).data) {
+                .directory => {
+                    var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
+                    defer dir.close();
+                    try archive.unpackDir(dir);
+                },
+                inline .regular_file, .executable_file => |file_contents, kind| if (target_path == null or std.mem.eql(u8, "-", target_path.?))
+                    try writer.writeAll(file_contents)
+                else
+                    try std.fs.cwd().writeFile(.{
+                        .sub_path = target_path.?,
+                        .data = file_contents,
+                        .flags = .{ .mode = switch (kind) {
+                            .regular_file => 0o666,
+                            .executable_file => 0o777,
+                            else => unreachable,
+                        } },
+                    }),
+                .symlink => if (target_path) |path|
+                    try std.fs.cwd().symLink(archive.symlinkString(0), path, .{})
+                else
+                    fatal("Target path required", .{}),
+            }
+        } else fatal("Invalid command '{s}'", .{command});
+    }
+    writer.flush() catch fatal("Failed to fully flush stdout", .{});
 }
 
 test {
