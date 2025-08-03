@@ -40,6 +40,7 @@ const help_message =
     \\    hash [PATH]
     \\        Encode PATH as a Nix archive and prints its SRI hash to standard output.
     \\        If PATH is omitted, read from standard input as a file.
+    \\
 ;
 
 const LsOptions = struct { long: bool, recursive: bool };
