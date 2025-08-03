@@ -27,9 +27,9 @@ pub const NarArchive = struct {
     file_contents_arena: std.heap.ArenaAllocator,
     list_allocator: std.mem.Allocator,
     /// For smaller file names (64 is the length of a SHA256 hash in hexadecimal)
-    small_name_list: MemoryPoolIndex([64]u8, .@"64") = .empty,
-    large_name_list: MemoryPoolIndex([std.fs.max_path_bytes]u8, .@"64") = .empty,
-    node_list: MemoryPoolIndex(Object, null) = .empty,
+    small_name_list: MemoryPoolIndex([64]u8, .@"64", 16) = .empty,
+    large_name_list: MemoryPoolIndex([std.fs.max_path_bytes]u8, .@"64", 2) = .empty,
+    node_list: MemoryPoolIndex(Object, null, 16) = .empty,
 
     /// Takes ownership of a slice representing a Nix archive and deserializes it.
     /// Guaranteed to not modify the slice if an error occurs.
@@ -510,7 +510,8 @@ pub const NarArchive = struct {
     }
 
     pub fn node(self: *NarArchive, index: u32) *Object {
-        return &self.node_list.array_list.items[index];
+        // std.debug.print("Accessing index {} with array length {}\n", .{index, self.node_list.items.len});
+        return &self.node_list.items[index];
     }
 
     pub fn symlinkString(self: *NarArchive, node_index: u32) []u8 {
@@ -519,8 +520,8 @@ pub const NarArchive = struct {
         const len = node_.data.symlink.len;
         return switch (len) {
             0 => unreachable, // Don't call this on the root node!
-            1...64 => self.small_name_list.array_list.items[index][0..len],
-            65...std.fs.max_path_bytes => self.large_name_list.array_list.items[index][0..len],
+            1...64 => self.small_name_list.items[index][0..len],
+            65...std.fs.max_path_bytes => self.large_name_list.items[index][0..len],
             else => unreachable, // Not a valid string
         };
     }
@@ -531,8 +532,8 @@ pub const NarArchive = struct {
         const len = node_.name_len;
         return switch (len) {
             0 => unreachable, // Don't call this on the root node!
-            1...64 => self.small_name_list.array_list.items[index][0..len],
-            65...std.fs.max_path_bytes => self.large_name_list.array_list.items[index][0..len],
+            1...64 => self.small_name_list.items[index][0..len],
+            65...std.fs.max_path_bytes => self.large_name_list.items[index][0..len],
             else => unreachable, // Not a valid string
         };
     }
@@ -570,34 +571,42 @@ pub const NarArchive = struct {
     }
 };
 
-pub fn MemoryPoolIndex(comptime T: type, comptime alignment: ?std.mem.Alignment) type {
+pub fn MemoryPoolIndex(comptime T: type, comptime alignment: ?std.mem.Alignment, alloc_chunk_size: u32) type {
+    if (alloc_chunk_size == 0) @compileError("alloc_chunk_size must be nonzero");
     return struct {
-        free_list: std.ArrayListUnmanaged(u32),
-        array_list: std.ArrayListAlignedUnmanaged(T, alignment),
+        free_list: []bool,
+        items: []align(if (alignment) |a| a.toByteUnits() else @alignOf(T)) T,
 
         pub const empty: Self = .{
-            .free_list = .empty,
-            .array_list = .empty,
+            .free_list = &.{},
+            .items = &.{},
         };
 
         pub fn create(self: *Self, allocator: std.mem.Allocator) error{OutOfMemory}!u32 {
-            if (self.free_list.pop()) |index|
-                return index
-            else {
-                _ = try self.array_list.addOne(allocator);
-                try self.free_list.ensureTotalCapacity(allocator, self.array_list.items.len);
-                return @intCast(self.array_list.items.len - 1);
+            if (std.mem.indexOfScalar(bool, self.free_list, true)) |index| {
+                self.free_list[index] = false;
+                return @intCast(index);
+            } else {
+                const old_len: u32 = @intCast(self.items.len);
+                if (old_len == std.math.maxInt(u32)) return error.OutOfMemory;
+                self.free_list = try allocator.realloc(self.free_list, old_len +| alloc_chunk_size);
+                self.items = try allocator.realloc(self.items, old_len +| alloc_chunk_size);
+
+                @memset(self.free_list[old_len..][1..], true);
+
+                return old_len;
             }
         }
 
         pub fn destroy(self: *Self, index: u32) void {
-            self.node(index).* = undefined;
-            try self.free_list.appendAssumeCapacity(index);
+            std.debug.assert(self.free_list[index] == false);
+            self.free_list[index] = true;
+            self.items[index] = undefined;
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.free_list.deinit(allocator);
-            self.array_list.deinit(allocator);
+            allocator.free(self.free_list);
+            allocator.free(self.items);
             self.* = undefined;
         }
 
