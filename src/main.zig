@@ -278,7 +278,7 @@ pub fn main() !void {
             error.IsFile => fatal("In archive: expected directory, found file", .{}),
             error.FileNotFound => fatal("In archive: file not found", .{}),
             error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.Overflow => fatal("Too many nested symlinks", .{}),
+            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
         };
         archive.root.entry = null;
         try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
@@ -303,7 +303,7 @@ pub fn main() !void {
             error.IsFile => fatal("In archive: expected directory, found file", .{}),
             error.FileNotFound => fatal("In archive: file not found", .{}),
             error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.Overflow => fatal("Too many nested symlinks", .{}),
+            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
         };
 
         switch (sub.data) {

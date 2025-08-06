@@ -5,7 +5,7 @@
 
     .fingerprint = 0x166ea098dbf17c11, // Changing this has security and trust implications.
 
-    .minimum_zig_version = "0.15.0-dev.1272+dea3ed7f5",
+    .minimum_zig_version = "0.15.0-dev.1428+e17a050bc",
 
     .dependencies = .{},
 

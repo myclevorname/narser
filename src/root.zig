@@ -339,16 +339,16 @@ pub const NarArchive = struct {
     pub fn unpackDir(self: *const NarArchive, target_dir: std.fs.Dir) !void {
         if (self.root.data.directory == null) return;
 
-        var items: std.BoundedArray(std.fs.Dir, 256) = .{};
-        defer if (items.len > 1) for (items.slice()[1..]) |*dir| dir.close();
+        var item_buf: [256]std.fs.Dir = undefined;
+        var items: std.ArrayListUnmanaged(std.fs.Dir) = .initBuffer(&item_buf);
+        defer if (items.items.len > 1) for (items.items[1..]) |*dir| dir.close();
         items.appendAssumeCapacity(target_dir);
 
         var current_node = self.root.data.directory.?;
 
         const lastItem = struct {
-            fn f(array: anytype) ?@TypeOf(array.buffer[0]) {
-                const slice = array.slice();
-                return if (slice.len == 0) null else slice[slice.len - 1];
+            fn f(array: anytype) ?@TypeOf(array.items[0]) {
+                return if (array.items.len == 0) null else array.items[array.items.len - 1];
             }
         }.f;
 
@@ -377,9 +377,10 @@ pub const NarArchive = struct {
                         return error.MaliciousArchive;
                     try cwd.makeDir(current_node.entry.?.name);
                     if (child) |node| {
-                        try items.ensureUnusedCapacity(1);
-                        const next = try cwd.openDir(current_node.entry.?.name, .{});
-                        items.appendAssumeCapacity(next);
+                        const next = items.addOneBounded() catch return error.NestedTooDeep;
+                        errdefer _ = items.pop().?;
+
+                        next.* = try cwd.openDir(current_node.entry.?.name, .{});
                         current_node = node;
                         continue;
                     }
@@ -427,12 +428,15 @@ pub fn dumpDirectory(
 
     try writeTokens(writer, &.{ .magic, .directory });
 
-    var iterators: std.BoundedArray(struct {
+    const Iterator = struct {
         dir_iter: std.fs.Dir.Iterator,
         object: *NamedObject,
         object_iter: ObjectIterator = .{},
-    }, 256) = .{};
-    defer if (iterators.len > 1) for (iterators.slice()[1..]) |*iter| iter.dir_iter.dir.close();
+    };
+
+    var iters_buf: [256]Iterator = undefined;
+    var iterators: std.ArrayListUnmanaged(Iterator) = .initBuffer(&iters_buf);
+    defer if (iterators.items.len > 1) for (iterators.items[1..]) |*iter| iter.dir_iter.dir.close();
 
     var objects = std.heap.MemoryPool(NamedObject).init(allocator);
     defer objects.deinit();
@@ -450,7 +454,7 @@ pub fn dumpDirectory(
     });
 
     next_dir: while (true) {
-        var cur = &iterators.buffer[iterators.len - 1];
+        var cur = &iterators.items[iterators.items.len - 1];
 
         if (cur.object_iter.current == null) while (try cur.dir_iter.next()) |entry| {
             const next_object = try objects.create();
@@ -481,10 +485,10 @@ pub fn dumpDirectory(
             switch (object.data) {
                 .directory => {
                     try writeTokens(writer, &.{.directory});
-                    try iterators.ensureUnusedCapacity(1);
-                    const next_dir = try cur.dir_iter.dir.openDir(object.entry.?.name, .{ .iterate = true });
+                    const next = try iterators.addOneBounded();
+                    errdefer _ = iterators.pop().?;
 
-                    const next = iterators.addOneAssumeCapacity();
+                    const next_dir = try cur.dir_iter.dir.openDir(object.entry.?.name, .{ .iterate = true });
                     next.* = .{
                         .object = @fieldParentPtr("object", object),
                         .dir_iter = next_dir.iterateAssumeFirstIteration(),
@@ -532,7 +536,7 @@ pub fn dumpDirectory(
             objects.destroy(cur.object);
             _ = iterators.pop().?;
 
-            cur = &iterators.buffer[iterators.len - 1];
+            cur = &iterators.items[iterators.items.len - 1];
         }
     }
     try writeTokens(writer, &.{.archive_end});
@@ -628,7 +632,8 @@ pub const Object = struct {
     /// Traverses an Object, following symbolic links.
     pub fn subPath(self: *Object, subpath: []const u8) !*Object {
         var cur = self;
-        var parts: std.BoundedArray([]const u8, 4096) = .{};
+        var parts_buf: [4096][]const u8 = undefined;
+        var parts: std.ArrayListUnmanaged([]const u8) = .initBuffer(&parts_buf);
         parts.appendAssumeCapacity(subpath);
 
         comptime std.debug.assert(std.fs.path.sep == '/');
@@ -658,10 +663,10 @@ pub const Object = struct {
             }
             switch (cur.data) {
                 .directory => {},
-                .file => if (parts.len != 0) return error.IsFile,
+                .file => if (parts.items.len != 0) return error.IsFile,
                 .symlink => |target| {
                     if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
-                    try parts.append(target);
+                    parts.appendBounded(target) catch return error.NestedTooDeep;
                     cur = cur.entry.?.parent;
                 },
             }
