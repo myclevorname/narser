@@ -502,17 +502,14 @@ pub fn dumpDirectory(
                     try writeTokens(writer, &.{.file_contents});
 
                     try writer.writeInt(u64, stat.size, .little);
-                    var left = stat.size;
 
                     var file = try cur.dir_iter.dir.openFile(object.entry.?.name, .{});
                     defer file.close();
+                    var fr_buf: [4096]u8 = undefined;
+                    var fr = file.reader(&fr_buf);
 
-                    while (left != 0) {
-                        var buf: [4096 * 8]u8 = undefined;
-                        const read = try file.read(&buf);
-                        try writer.writeAll(buf[0..read]);
-                        left -= read;
-                    }
+                    const read = try writer.sendFileAll(&fr, .limited64(stat.size));
+                    if (read != stat.size) return error.EndOfStream;
 
                     const zeroes: [8]u8 = .{0} ** 8;
                     try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);

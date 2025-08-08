@@ -177,7 +177,7 @@ const OptsIter = struct {
 
 pub fn main() !void {
     const stdout = std.fs.File.stdout();
-    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_buffer: [4096 * 32]u8 = undefined;
     var fw = stdout.writer(&stdout_buffer);
     var writer = &fw.interface;
 
@@ -223,7 +223,10 @@ pub fn main() !void {
     if (std.mem.eql(u8, "pack", command) or std.mem.eql(u8, "hash", command)) {
         const use_hasher = std.mem.eql(u8, "hash", command);
         var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
+
+        var hash_buffer: [2048]u8 = undefined;
         var hash_upd = hasher.writer().adaptToNewApi();
+        hash_upd.new_interface.buffer = &hash_buffer;
         const used_writer = if (use_hasher) &hash_upd.new_interface else writer;
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
@@ -253,6 +256,7 @@ pub fn main() !void {
         }
 
         if (use_hasher) {
+            used_writer.flush() catch unreachable;
             const sha256_hash = hasher.finalResult();
             var base64_hash: [44]u8 = undefined;
 
