@@ -508,11 +508,14 @@ pub fn dumpDirectory(
                     var fr_buf: [4096]u8 = undefined;
                     var fr = file.reader(&fr_buf);
 
-                    const read = try writer.sendFileAll(&fr, .limited64(stat.size));
-                    if (read != stat.size) return error.EndOfStream;
+                    const read = try writer.sendFileAll(&fr, if (stat.size != 0)
+                        .unlimited
+                    else
+                        .limited64(stat.size));
+                    if (stat.size != 0 and read != stat.size) return error.EndOfStream;
 
                     const zeroes: [8]u8 = .{0} ** 8;
-                    try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);
+                    try writer.writeAll(zeroes[0..@intCast((8 - read % 8) % 8)]);
                 },
                 .symlink => {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -550,18 +553,15 @@ pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: *std.Io.Writer) !v
 
     try writer.writeInt(u64, stat.size, .little);
 
-    var left = stat.size;
     var buf: [4096]u8 = undefined;
+    var fr = file.reader(&buf);
 
-    while (left != 0) {
-        const read = try file.read(&buf);
-        if (read == 0) return error.UnexpectedEof;
-        try writer.writeAll(buf[0..read]);
-        left -= read;
-    }
+    const read = try writer.sendFileAll(&fr, if (stat.size == 0) .unlimited else .limited64(stat.size));
+
+    if (stat.size != 0 and read != stat.size) return error.EndOfStream;
 
     const zeroes: [8]u8 = .{0} ** 8;
-    try writer.writeAll(zeroes[0..@intCast((8 - stat.size % 8) % 8)]);
+    try writer.writeAll(zeroes[0..@intCast((8 - read % 8) % 8)]);
 
     try writeTokens(writer, &.{.archive_end});
 }
