@@ -179,20 +179,24 @@ pub const NarArchive = struct {
         };
         self.root = root_node;
 
-        var iters: std.BoundedArray(struct {
+        const Iterator = struct {
             iterator: std.fs.Dir.Iterator, // holds the directory
             object: *Object,
-        }, 256) = .{};
+        };
+
+        var iters_buf: [256]Iterator = undefined;
+
+        var iters: std.ArrayListUnmanaged(Iterator) = .initBuffer(&iters_buf);
 
         iters.appendAssumeCapacity(.{
             .iterator = root.iterate(),
             .object = root_node,
         });
 
-        errdefer if (iters.len > 1) for (iters.slice()[1..]) |*x| x.iterator.dir.close();
+        errdefer if (iters.items.len > 1) for (iters.items[1..]) |*x| x.iterator.dir.close();
 
-        while (iters.len != 0) {
-            var cur = &iters.slice()[iters.len - 1];
+        while (iters.items.len != 0) {
+            var cur = &iters.items[iters.items.len - 1];
             const entry = try cur.iterator.next();
 
             if (entry) |e| {
@@ -205,10 +209,10 @@ pub const NarArchive = struct {
                     .directory => {
                         next.*.data = .{ .directory = null };
                         var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
-                        iters.append(.{
+                        iters.appendBounded(.{
                             .iterator = child.iterate(),
                             .object = next,
-                        }) catch @panic("Implementation limit reached: Directory nested too deeply");
+                        }) catch return error.NestedTooDeep;
                     },
                     .sym_link => {
                         next.*.data = .{ .symlink = undefined };
@@ -235,7 +239,7 @@ pub const NarArchive = struct {
                 }
                 try cur.object.insertChild(next);
             } else {
-                if (iters.len > 1) cur.iterator.dir.close();
+                if (iters.items.len > 1) cur.iterator.dir.close();
                 _ = iters.pop().?;
             }
         }
@@ -915,9 +919,9 @@ test "more complex" {
     const expected = @embedFile("tests/complex.nar") ** 3 ++
         @embedFile("tests/complex_empty.nar") ** 2;
 
-    var array: std.BoundedArray(u8, 2 * expected.len) = .{};
-    var updated = array.writer().adaptToNewApi();
-    const writer = &updated.new_interface;
+    var array_buf: [2 * expected.len]u8 = undefined;
+    var fixed: std.Io.Writer = .fixed(&array_buf);
+    const writer = &fixed;
 
     {
         try dumpDirectory(allocator, root, writer);
@@ -947,5 +951,5 @@ test "more complex" {
     }
 
     // TODO: Add more dumps and froms
-    try std.testing.expectEqualSlices(u8, expected, array.slice());
+    try std.testing.expectEqualSlices(u8, expected, writer.buffered());
 }
