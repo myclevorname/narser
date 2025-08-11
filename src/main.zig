@@ -225,13 +225,12 @@ pub fn main() !void {
         var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
 
         var hash_buffer: [2048]u8 = undefined;
-        var hash_upd = hasher.writer().adaptToNewApi();
-        hash_upd.new_interface.buffer = &hash_buffer;
+        var hash_upd = hasher.writer().adaptToNewApi(&hash_buffer);
         const used_writer = if (use_hasher) &hash_upd.new_interface else writer;
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
-            try narser.dumpFile(std.fs.File.stdin(), opts.executable, used_writer);
+            try narser.dumpFile(allocator, std.fs.File.stdin(), opts.executable, used_writer);
         } else {
             var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -249,7 +248,7 @@ pub fn main() !void {
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
-                        try narser.dumpFile(file, null, used_writer);
+                        try narser.dumpFile(allocator, file, null, used_writer);
                     },
                 }
             }

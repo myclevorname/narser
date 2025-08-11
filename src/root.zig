@@ -505,21 +505,29 @@ pub fn dumpDirectory(
                     if (stat.mode & 0o111 != 0) try writeTokens(writer, &.{.executable_file});
                     try writeTokens(writer, &.{.file_contents});
 
-                    try writer.writeInt(u64, stat.size, .little);
-
                     var file = try cur.dir_iter.dir.openFile(object.entry.?.name, .{});
                     defer file.close();
                     var fr_buf: [4096]u8 = undefined;
                     var fr = file.reader(&fr_buf);
 
-                    const read = try writer.sendFileAll(&fr, if (stat.size != 0)
-                        .unlimited
-                    else
-                        .limited64(stat.size));
-                    if (stat.size != 0 and read != stat.size) return error.EndOfStream;
+                    const size = if (fr.getSize()) |s| blk: {
+                        try writer.writeInt(u64, stat.size, .little);
+
+                        const read = try writer.sendFileAll(&fr, .limited64(stat.size));
+                        if (read != stat.size) return error.EndOfStream;
+                        break :blk s;
+                    } else |_| blk: {
+                        var aw = std.Io.Writer.Allocating.init(allocator);
+                        defer aw.deinit();
+
+                        const s = try aw.writer.sendFileAll(&fr, .unlimited);
+                        try writer.writeInt(u64, s, .little);
+                        try writer.writeAll(aw.getWritten());
+                        break :blk s;
+                    };
 
                     const zeroes: [8]u8 = .{0} ** 8;
-                    try writer.writeAll(zeroes[0..@intCast((8 - read % 8) % 8)]);
+                    try writer.writeAll(zeroes[0..@intCast((8 - size % 8) % 8)]);
                 },
                 .symlink => {
                     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -548,24 +556,37 @@ pub fn dumpDirectory(
 
 /// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
 /// memory-efficient than calling `fromFileContents` followed by `dump`.
-pub fn dumpFile(file: std.fs.File, executable: ?bool, writer: *std.Io.Writer) !void {
+pub fn dumpFile(allocator: std.mem.Allocator, file: std.fs.File, executable: ?bool, writer: *std.Io.Writer) !void {
     const stat = try file.stat();
     const is_executable = executable orelse (stat.mode & 0o111 != 0);
     try writeTokens(writer, &.{ .magic, .file });
     if (is_executable) try writeTokens(writer, &.{.executable_file});
     try writeTokens(writer, &.{.file_contents});
 
-    try writer.writeInt(u64, stat.size, .little);
-
     var buf: [4096]u8 = undefined;
     var fr = file.reader(&buf);
 
-    const read = try writer.sendFileAll(&fr, if (stat.size == 0) .unlimited else .limited64(stat.size));
+    const size = blk: {
+        if (fr.getSize()) |s| {
+            try writer.writeInt(u64, s, .little);
 
-    if (stat.size != 0 and read != stat.size) return error.EndOfStream;
+            const read = try writer.sendFileAll(&fr, .limited64(s));
 
+            if (read != s) return error.EndOfStream;
+
+            break :blk s;
+        } else |_| {
+            var aw = std.Io.Writer.Allocating.init(allocator);
+            defer aw.deinit();
+
+            const s = try aw.writer.sendFileAll(&fr, .unlimited);
+            try writer.writeInt(u64, s, .little);
+            try writer.writeAll(aw.getWritten());
+            break :blk s;
+        }
+    };
     const zeroes: [8]u8 = .{0} ** 8;
-    try writer.writeAll(zeroes[0..@intCast((8 - read % 8) % 8)]);
+    try writer.writeAll(zeroes[0..@intCast((8 - size % 8) % 8)]);
 
     try writeTokens(writer, &.{.archive_end});
 }
@@ -901,7 +922,7 @@ test "nar to directory to nar" {
 
     var buffer: [2 * expected.len]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    var updated = stream.writer().adaptToNewApi();
+    var updated = stream.writer().adaptToNewApi(&.{});
 
     try data.dump(&updated.new_interface);
 
