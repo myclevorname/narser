@@ -190,8 +190,8 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.skip();
 
-    var processed_args: std.ArrayList([]const u8) = .init(allocator);
-    defer processed_args.deinit();
+    var processed_args: std.ArrayList([]const u8) = .empty;
+    defer processed_args.deinit(allocator);
 
     var opts_iter = OptsIter.init(&args);
     const Options = struct {
@@ -210,7 +210,7 @@ pub fn main() !void {
             'x' => opts.executable = true,
             else => fatal("Invalid option '{c}'\n{s}", .{ opt, help_message }),
         },
-        .argument => |str| try processed_args.append(str),
+        .argument => |str| try processed_args.append(allocator, str),
     };
 
     if (opts.show_help or processed_args.items.len == 0) {
