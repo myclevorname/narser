@@ -49,13 +49,13 @@ pub fn build(b: *std.Build) void {
 
     const run_narser_unit_tests = b.addRunArtifact(narser_unit_tests);
 
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe.root_module,
+    const fmt_check = b.addFmt(.{
+        .paths = &.{ "src", "build.zig" },
+        .exclude_paths = &.{"src/tests"},
+        .check = true,
     });
 
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_narser_unit_tests.step);
+    test_step.dependOn(&fmt_check.step);
 }

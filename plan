@@ -1,0 +1,13 @@
+DONE 1. Decide data structure
+	- node sizes:	32-bit	64-bit
+		safe	24	32
+		unsafe	28	40
+DONE 2. the token stuff
+3. file
+4. symlink
+5. directory
+6. dump
+7. writer
+8. tests
+9. benchmark
+10. maybe v4.0

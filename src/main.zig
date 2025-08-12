@@ -1,6 +1,7 @@
 const std = @import("std");
 const narser = @import("narser");
 
+const NixArchive = narser.NixArchive;
 const fatal = std.process.fatal;
 
 const max_depth: usize = 256;
@@ -12,7 +13,9 @@ const help_message =
     \\    -h, -?  Display this help message
     \\    -l, -L  Long listing (ls)
     \\    -r, -R  Recurse (ls)
-    \\    -x      Standard input is executable (pack, hash)
+    \\    -x      Archive of file is executable (pack, hash)
+    \\    -n      Archive of file is not executable (default on standard input)
+    \\            (pack, hash)
     \\
     \\Commands:
     \\    unpack <ARCHIVE> <PATH>
@@ -41,56 +44,68 @@ const help_message =
     \\        Encode PATH as a Nix archive and prints its SRI hash to standard output.
     \\        If PATH is omitted, read from standard input as a file.
     \\
+    \\Internal commands:
+    \\    complete <CUR> <ARG ...>
+    \\    complete <FILE> <CUR> <ARG ...>
+    \\        Return a newline-separated list of suggestions for the bash completion
+    \\        script. If FILE is provided, preprocess and cache the archive.
+    \\
 ;
 
 const LsOptions = struct { long: bool, recursive: bool };
 
-pub fn ls(archive: *const narser.NarArchive, writer: *std.Io.Writer, opts: LsOptions) !void {
-    var node = archive.root;
+pub fn ls(writer: *std.Io.Writer, archive: NixArchive, root: NixArchive.Node, opts: LsOptions) !void {
+    var node = root;
 
-    if (opts.long) switch (node.data) {
+    if (opts.long) switch (node.contents(archive)) {
         .directory => {},
-        .file, .symlink => return try printPath(node, writer, true),
-    } else switch (node.data) {
+        .file, .symlink => return try printPath(writer, archive, node, root, true),
+    } else switch (node.contents(archive)) {
         .directory => {},
         .file, .symlink => return try writer.writeAll("\n"),
     }
 
-    node = node.data.directory orelse return;
+    node = node.contents(archive).directory orelse return;
 
     while (true) {
-        try printPath(node, writer, opts.long);
+        try printPath(writer, archive, node, root, opts.long);
 
-        if (opts.recursive and node.data == .directory and node.data.directory != null) {
-            node = node.data.directory.?;
+        if (opts.recursive and node.contents(archive) == .directory and
+            node.contents(archive).directory != null)
+        {
+            node = node.contents(archive).directory.?;
         } else {
-            while ((node.entry orelse return).next == null) {
-                node = node.entry.?.parent;
-            }
-            node = node.entry.?.next.?;
+            while (node != root and node.next(archive) != null) {
+                node = node.parent(archive).?;
+            } else if (node == root) return;
+            node = node.next(archive).?;
         }
     }
 }
 
-fn printPath(node: *const narser.Object, writer: *std.Io.Writer, long: bool) !void {
-    if (long) switch (node.data) {
+fn printPath(
+    writer: *std.Io.Writer,
+    archive: NixArchive,
+    node: NixArchive.Node,
+    root: NixArchive.Node,
+    long: bool,
+) !void {
+    if (long) switch (node.contents(archive)) {
         .directory => try writer.writeAll("dr-xr-xr-x                    0 "),
         .symlink => try writer.writeAll("lrwxrwxrwx                    0 "),
         .file => |metadata| {
-            try writer.writeAll(if (metadata.is_executable) "-r-xr-xr-x" else "-r--r--r--");
+            try writer.writeAll(if (metadata.executable) "-r-xr-xr-x" else "-r--r--r--");
             const spaces: [21]u8 = .{' '} ** (31 - "-r-xr-xr-x".len);
             const len_size = if (metadata.contents.len == 0) 1 else 1 + std.math.log10_int(metadata.contents.len);
             try writer.print("{s}{} ", .{ spaces[len_size..], metadata.contents.len });
         },
     };
 
-    var cur: ?*const narser.Object = node;
-    var buf: [max_depth][]u8 = undefined;
+    var cur = node;
+    var buf: [max_depth][]const u8 = undefined;
     const count: usize = blk: for (0..max_depth) |i| {
-        if (cur) |x| {
-            buf[i] = if (x.entry) |e| e.name else "";
-            cur = if (x.entry) |e| e.parent else null;
-        } else break :blk i;
+        buf[i] = if (cur != root) cur.name(archive).? else "";
+        cur = if (cur != root) cur.parent(archive).? else break :blk i;
     } else return error.OutOfMemory;
 
     var iter = std.mem.reverseIterator(buf[0 .. count - 1]);
@@ -103,7 +118,8 @@ fn printPath(node: *const narser.Object, writer: *std.Io.Writer, long: bool) !vo
         }
     }
 
-    if (long and node.data == .symlink) try writer.print(" -> {s}", .{node.data.symlink});
+    if (long and node.contents(archive) == .symlink)
+        try writer.print(" -> {s}", .{node.contents(archive).symlink});
 
     try writer.print("\n", .{});
 }
@@ -179,7 +195,11 @@ pub fn main() !void {
     const stdout = std.fs.File.stdout();
     var stdout_buffer: [4096 * 32]u8 = undefined;
     var fw = stdout.writer(&stdout_buffer);
-    var writer = &fw.interface;
+    const writer = &fw.interface;
+
+    var stdin_buffer: [4096]u8 = undefined;
+    var inr = std.fs.File.stdin().reader(&stdin_buffer);
+    const stdin_reader = &inr.interface;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
@@ -190,8 +210,8 @@ pub fn main() !void {
     defer args.deinit();
     _ = args.skip();
 
-    var processed_args: std.ArrayList([]const u8) = .init(allocator);
-    defer processed_args.deinit();
+    var processed_args: std.ArrayList([]const u8) = .empty;
+    defer processed_args.deinit(allocator);
 
     var opts_iter = OptsIter.init(&args);
     const Options = struct {
@@ -207,10 +227,11 @@ pub fn main() !void {
             'h', '?' => opts.show_help = true,
             'l', 'L' => opts.long_listing = true,
             'r', 'R' => opts.recurse = true,
+            'n' => opts.executable = false,
             'x' => opts.executable = true,
             else => fatal("Invalid option '{c}'\n{s}", .{ opt, help_message }),
         },
-        .argument => |str| try processed_args.append(str),
+        .argument => |str| try processed_args.append(allocator, str),
     };
 
     if (opts.show_help or processed_args.items.len == 0) {
@@ -230,12 +251,18 @@ pub fn main() !void {
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
-            try narser.dumpFile(allocator, std.fs.File.stdin(), opts.executable, used_writer);
+            try NixArchive.dumpFileDirect(
+                allocator,
+                stdin_reader,
+                opts.executable,
+                inr.getSize() catch null,
+                used_writer,
+            );
         } else {
             var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
             if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
-                try narser.dumpSymlink(target, used_writer);
+                try NixArchive.dumpSymlinkDirect(target, used_writer);
             } else |_| {
                 const stat = try std.fs.cwd().statFile(argument);
                 switch (stat.kind) {
@@ -243,12 +270,21 @@ pub fn main() !void {
                     .directory => {
                         var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
                         defer dir.close();
-                        try narser.dumpDirectory(allocator, dir, used_writer);
+                        try NixArchive.dumpDirectoryDirect(allocator, dir, used_writer);
                     },
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
-                        try narser.dumpFile(allocator, file, null, used_writer);
+                        var fbuf: [4096]u8 = undefined;
+                        var fr = file.reader(&fbuf);
+                        const is_executable: bool = (try file.mode() & 0o111) != 0;
+                        try NixArchive.dumpFileDirect(
+                            allocator,
+                            &fr.interface,
+                            is_executable,
+                            fr.getSize() catch null,
+                            used_writer,
+                        );
                     },
                 }
             }
@@ -266,50 +302,53 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, "ls", command)) {
         var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
-        const contents = try std.fs.cwd().readFileAlloc(
-            allocator,
-            argument,
-            std.math.maxInt(usize),
-        );
-        defer allocator.free(contents);
+        var file = try std.fs.cwd().openFile(argument, .{});
+        defer file.close();
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
+        var file_buf: [4096]u8 = undefined;
+        var file_reader = file.reader(&file_buf);
+
+        var archive = try NixArchive.fromReader(
+            allocator,
+            &file_reader.interface,
+            .{ .discard_file_contents = true },
+        );
         defer archive.deinit();
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
-        archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.IsFile => fatal("In archive: expected directory, found file", .{}),
-            error.FileNotFound => fatal("In archive: file not found", .{}),
-            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
+        const root = NixArchive.Node.subPath(.root, archive, subpath) catch |e| switch (e) {
+            // error.IsFile => fatal("In archive: expected directory, found file", .{}),
+            // error.FileNotFound => fatal("In archive: file not found", .{}),
+            // error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            // error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
         };
-        archive.root.entry = null;
-        try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
+        try ls(writer, archive, root, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
-        const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
-        defer allocator.free(contents);
+        var file = try std.fs.cwd().openFile(archive_path, .{});
+        var file_buf: [4096]u8 = undefined;
+        var fr = file.reader(&file_buf);
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
+        var archive = try NixArchive.fromReader(allocator, &fr.interface, .{});
         defer archive.deinit();
 
-        switch (archive.root.data) {
+        switch (NixArchive.Node.contents(.root, archive)) {
             .directory => |child| if (child == null) fatal("Archive is an empty directory", .{}),
             .file => {},
             .symlink => fatal("narser does not support following symbolic links to the filesystem", .{}),
         }
 
-        const sub = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.IsFile => fatal("In archive: expected directory, found file", .{}),
-            error.FileNotFound => fatal("In archive: file not found", .{}),
-            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
+        const sub = NixArchive.Node.subPath(.root, archive, subpath) catch |e| switch (e) {
+            //error.IsFile => fatal("In archive: expected directory, found file", .{}),
+            //error.FileNotFound => fatal("In archive: file not found", .{}),
+            //error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            //error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
         };
 
-        switch (sub.data) {
+        switch (sub.contents(archive)) {
             .file => |metadata| try writer.writeAll(metadata.contents),
             .symlink => unreachable,
             .directory => fatal("In archive: expected file, found directory", .{}),
@@ -318,19 +357,20 @@ pub fn main() !void {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
 
-        const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
-        defer allocator.free(contents);
+        var file = try std.fs.cwd().openFile(archive_path, .{});
+        var file_buf: [4096]u8 = undefined;
+        var fr = file.reader(&file_buf);
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
+        var archive = try NixArchive.fromReader(allocator, &fr.interface, .{});
         defer archive.deinit();
 
         const target_path = if (processed_args.items.len < 3) null else processed_args.items[2];
 
-        switch (archive.root.data) {
+        switch (NixArchive.Node.contents(.root, archive)) {
             .directory => {
                 var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
                 defer dir.close();
-                try archive.unpackDir(dir);
+                try archive.unpackDirectory(dir);
             },
             .file => |metadata| if (target_path == null or std.mem.eql(u8, "-", target_path.?))
                 try writer.writeAll(metadata.contents)
@@ -338,14 +378,17 @@ pub fn main() !void {
                 try std.fs.cwd().writeFile(.{
                     .sub_path = target_path.?,
                     .data = metadata.contents,
-                    .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
+                    .flags = .{ .mode = if (metadata.executable) 0o777 else 0o666 },
                 }),
             .symlink => |target| if (target_path) |path|
                 try std.fs.cwd().symLink(target, path, .{})
             else
                 fatal("Target path required", .{}),
         }
-    } else fatal("Invalid command '{s}'", .{command});
+    } else if (std.mem.eql(u8, "complete", command))
+        unreachable // TODO
+    else
+        fatal("Invalid command '{s}'", .{command});
 
     try writer.flush();
 }
