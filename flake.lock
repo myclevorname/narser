@@ -59,11 +59,11 @@
     "zig": {
       "flake": false,
       "locked": {
-        "lastModified": 1754940472,
-        "narHash": "sha256-RgDITX24C13ZJ0MyKoYGjBwGZxzMZ3W0DOmfX/SQ9bU=",
+        "lastModified": 1754952769,
+        "narHash": "sha256-PON+LtCuH3Yk5YondBnEY/aod+CukU3p3Z1bI+Eb3os=",
         "owner": "ziglang",
         "repo": "zig",
-        "rev": "282c3575b16499518b19ee9b1a8364c9379dab94",
+        "rev": "749f10af49022597d873d41df5c600e97e5c4a37",
         "type": "github"
       },
       "original": {
