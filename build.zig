@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const use_llvm = b.option(bool, "use-llvm", "Use the LLVM backend");
+    const openssl = b.option(bool, "openssl", "Link against OpenSSL") orelse false;
     const strip = b.option(bool, "strip", "Remove debugging symbols");
 
     if (target.result.os.tag == .windows)
@@ -15,9 +16,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    var tests_path = std.Build.Step.Options.create(b);
-    tests_path.addOptionPath("tests_path", b.path("src/tests"));
-    narser.addImport("tests", tests_path.createModule());
+    const options = b.addOptions();
+    options.addOptionPath("tests_path", b.path("src/tests"));
+    options.addOption(bool, "openssl", openssl);
+
+    const options_mod = options.createModule();
+    narser.addImport("options", options_mod);
 
     const exe = b.addExecutable(.{
         .name = "narser",
@@ -28,9 +32,24 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .strip = strip,
             .single_threaded = true,
-            .imports = &.{.{ .name = "narser", .module = narser }},
+            .imports = &.{
+                .{ .name = "narser", .module = narser },
+                .{ .name = "options", .module = options_mod },
+            },
         }),
     });
+
+    if (openssl) {
+        const openssl_dep = b.lazyDependency("openssl", .{
+            .target = target,
+            .optimize = optimize,
+        });
+        if (openssl_dep) |d| {
+            exe.root_module.link_libc = true;
+            exe.root_module.linkLibrary(d.artifact("ssl"));
+            exe.root_module.linkLibrary(d.artifact("crypto"));
+        }
+    }
 
     b.installArtifact(exe);
 

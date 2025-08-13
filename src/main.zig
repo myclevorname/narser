@@ -1,5 +1,10 @@
 const std = @import("std");
 const narser = @import("narser");
+const use_openssl = @import("options").openssl;
+
+const openssl = @cImport({
+    @cInclude("openssl/evp.h");
+});
 
 const fatal = std.process.fatal;
 
@@ -107,6 +112,32 @@ fn printPath(node: *const narser.Object, writer: *std.Io.Writer, long: bool) !vo
 
     try writer.print("\n", .{});
 }
+
+const Hasher = if (use_openssl) OpenSslHasher else std.crypto.hash.sha2.Sha256;
+
+const OpenSslHasher = struct {
+    context: *openssl.EVP_MD_CTX,
+
+    pub fn init(_: struct {}) OpenSslHasher {
+        const self: OpenSslHasher = .{ .context = openssl.EVP_MD_CTX_create().? };
+        _ = openssl.EVP_DigestInit(self.context, openssl.EVP_sha256());
+        return self;
+    }
+
+    pub fn update(self: OpenSslHasher, data: []const u8) void {
+        _ = openssl.EVP_DigestUpdate(self.context, data.ptr, data.len);
+    }
+
+    pub fn finalResult(self: *OpenSslHasher) [64]u8 {
+        var hash_buf: [64]u8 = undefined;
+        var hash_length: c_uint = undefined;
+        _ = openssl.EVP_DigestFinal(self.context, &hash_buf, &hash_length);
+        std.debug.assert(hash_length == 64);
+        openssl.EVP_MD_CTX_free(self.context);
+        self.* = undefined;
+        return hash_buf;
+    }
+};
 
 const OptsIter = struct {
     current: ?[]const u8,
@@ -222,11 +253,11 @@ pub fn main() !void {
     const command = processed_args.items[0];
     if (std.mem.eql(u8, "pack", command) or std.mem.eql(u8, "hash", command)) {
         const use_hasher = std.mem.eql(u8, "hash", command);
-        var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
 
         var hash_buffer: [2048]u8 = undefined;
-        var hash_upd = hasher.writer().adaptToNewApi(&hash_buffer);
-        const used_writer = if (use_hasher) &hash_upd.new_interface else writer;
+        var hasher: std.Io.Writer.Hashing(Hasher) = .init(&hash_buffer);
+
+        const used_writer = if (use_hasher) &hasher.writer else writer;
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
@@ -256,7 +287,7 @@ pub fn main() !void {
 
         if (use_hasher) {
             used_writer.flush() catch unreachable;
-            const sha256_hash = hasher.finalResult();
+            const sha256_hash = hasher.hasher.finalResult();
             var base64_hash: [44]u8 = undefined;
 
             _ = std.base64.standard.Encoder.encode(&base64_hash, &sha256_hash);

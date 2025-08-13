@@ -1,0 +1,16 @@
+.{
+    .name = .openssl,
+    .version = "3.6.0",
+    .minimum_zig_version = "0.14.0",
+    .fingerprint = 0x773a47f1ef0097c1,
+    .paths = .{
+        "build.zig",
+        "crypto",
+        "include_gen",
+        "include",
+        "LICENSE",
+        "providers",
+        "README.md",
+        "ssl",
+    },
+}

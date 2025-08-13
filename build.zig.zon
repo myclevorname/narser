@@ -7,11 +7,16 @@
 
     .minimum_zig_version = "0.15.0-dev.1518+749f10af4",
 
-    .dependencies = .{},
+    .dependencies = .{
+        .openssl = .{
+            .path = "deps/openssl-zig",
+        },
+    },
 
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "deps",
         "src",
         "LICENSE",
         "README.md",

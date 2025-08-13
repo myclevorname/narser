@@ -1,5 +1,5 @@
 const std = @import("std");
-const tests_path = @import("tests").tests_path;
+const tests_path = @import("options").tests_path;
 
 const assert = std.debug.assert;
 const expect = std.testing.expect;

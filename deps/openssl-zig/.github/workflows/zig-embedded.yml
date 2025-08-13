@@ -1,0 +1,28 @@
+name: Zig embedded
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        targets:
+          - aarch64-linux-gnu
+          - aarch64-linux
+          - riscv64-linux-musl
+          - powerpc64-linux
+          - aarch64-windows
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: master
+      - name: Build Summary ${{ matrix.targets }}
+        run: zig build --summary all -freference-trace -Dtarget=${{ matrix.targets }}
+      - name: Build Summary - Zig Package ${{ matrix.targets }}
+        run: zig build --build-file $PWD/test_zigpkg/build.zig --summary all -freference-trace -Dtarget=${{ matrix.targets }}
