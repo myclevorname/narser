@@ -522,7 +522,7 @@ pub fn dumpDirectory(
 
                         const s = try aw.writer.sendFileAll(&fr, .unlimited);
                         try writer.writeInt(u64, s, .little);
-                        try writer.writeAll(aw.getWritten());
+                        try writer.writeAll(aw.written());
                         break :blk s;
                     };
 
@@ -581,7 +581,7 @@ pub fn dumpFile(allocator: std.mem.Allocator, file: std.fs.File, executable: ?bo
 
             const s = try aw.writer.sendFileAll(&fr, .unlimited);
             try writer.writeInt(u64, s, .little);
-            try writer.writeAll(aw.getWritten());
+            try writer.writeAll(aw.written());
             break :blk s;
         }
     };

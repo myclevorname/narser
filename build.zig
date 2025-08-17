@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    b.installFile("src/_narser.bash", "share/bash-completion/completions/narser");
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
