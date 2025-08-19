@@ -536,7 +536,7 @@ pub const NixArchive = struct {
                 return false
             else
                 reader.toss(token.string().len);
-            std.debug.print("Token take {s}\n", .{@tagName(token)});
+            //std.debug.print("Token take {s}\n", .{@tagName(token)});
             return true;
         }
 
@@ -547,7 +547,7 @@ pub const NixArchive = struct {
             };
             if (!std.mem.eql(u8, token.string(), peeked))
                 return false;
-            std.debug.print("Token peek {s}\n", .{@tagName(token)});
+            //std.debug.print("Token peek {s}\n", .{@tagName(token)});
             return true;
         }
 
@@ -556,13 +556,13 @@ pub const NixArchive = struct {
                 return error.UnexpectedToken
             else
                 reader.toss(token.string().len);
-            std.debug.print("Token take {s}\n", .{@tagName(token)});
+            //std.debug.print("Token take {s}\n", .{@tagName(token)});
         }
 
         fn expectPeek(comptime token: Token, reader: *std.Io.Reader) !void {
             if (!std.mem.eql(u8, token.string(), try reader.peekArray(token.string().len)))
                 return error.UnexpectedToken;
-            std.debug.print("Token peek {s}\n", .{@tagName(token)});
+            //std.debug.print("Token peek {s}\n", .{@tagName(token)});
         }
 
         fn write(comptime token: Token, writer: *std.Io.Writer) !void {
