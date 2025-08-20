@@ -101,10 +101,23 @@ pub const NixArchive = struct {
                 try Token.expectTake(.directory_entry_inner, reader);
                 continue :state .object_type;
             },
+            .next => {
+                if (current == .root) {
+                    continue :state .archive_end;
+                } else {
+                    try Token.expectTake(.directory_entry_end, reader);
+                    continue :state if (try Token.peek(.directory_entry, reader))
+                        .directory_entry
+                    else
+                        .leave_directory;
+                }
+            },
             .leave_directory => {
-                try Token.expectTake(.directory_entry_end, reader);
+                std.debug.assert(current != .root);
                 current = current.parent(self).?;
-                continue :state if (current == .root) .archive_end else .directory_entry;
+                if (current == .root) continue :state .archive_end;
+                try Token.expectPeek(.directory_entry_end, reader);
+                continue :state .next;
             },
             .archive_end => {
                 try Token.expectTake(.archive_end, reader);
@@ -124,8 +137,7 @@ pub const NixArchive = struct {
                 try current.setContents(&self, .{ .symlink = try reader.take(size) });
                 if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
                     return error.NonZeroPadding;
-                try Token.expectTake(.directory_entry_end, reader);
-                continue :state if (current == .root) .archive_end else .directory_entry;
+                continue :state .next;
             },
             .file => {
                 reader.toss(Token.string(.file).len);
@@ -153,13 +165,16 @@ pub const NixArchive = struct {
                         self.file_contents_arena.allocator(),
                         size,
                     );
+                    //defer aw.deinit();
+
                     try reader.streamExact64(&aw.writer, size);
+
+                    // this is an arena
                     current.inner(self).data.file = aw.toOwnedSlice() catch unreachable;
                 }
                 if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
                     return error.NonZeroPadding;
-                try Token.expectTake(.directory_entry_end, reader);
-                continue :state if (current == .root) .archive_end else .directory_entry;
+                continue :state .next;
             },
             .directory => {
                 reader.toss(Token.string(.directory).len);
@@ -175,10 +190,10 @@ pub const NixArchive = struct {
                         .kind = .regular_file, // Must be something other than symlink
                         .data = undefined,
                     };
+                    parent.setContents(&self, .{ .directory = current }) catch unreachable;
                     continue :state .entry_name;
                 }
-                if (current != .root) try Token.expectTake(.directory_entry_end, reader);
-                continue :state if (current == .root) .archive_end else .directory_entry;
+                continue :state .next;
             },
         }
         comptime unreachable;
@@ -246,22 +261,9 @@ pub const NixArchive = struct {
         return self;
     }
 
-    pub fn dump(self: NixArchive, buffer: []u8) Reader {
-        std.debug.assert(buffer.len >= 8 + max_name_len);
-        return .{
-            .archive = self,
-            .reader = .{
-                .vtable = &.{
-                    .stream = &Reader.stream,
-                    .discard = &Reader.discard,
-                    .readVec = &Reader.readVec,
-                    .rebase = &Reader.rebase,
-                },
-                .buffer = buffer,
-                .seek = 0,
-                .end = 0,
-            },
-        };
+    pub fn dump(self: NixArchive, writer: *std.Io.Writer) !void {
+        _ = .{ self, writer };
+        unreachable; // TODO
     }
 
     pub fn dumpFileDirect(
@@ -271,16 +273,39 @@ pub const NixArchive = struct {
         size: ?u64,
         writer: *std.Io.Writer,
     ) !void {
-        _ = .{ allocator, reader, executable, size, writer };
-        unreachable; // TODO
+        try Token.write(.magic, writer);
+        try Token.write(.file, writer);
+        if (executable) try Token.write(.executable, writer);
+        try Token.write(.file_contents, writer);
+
+        if (size) |s| {
+            try writer.writeInt(u64, s, .little);
+            try reader.streamExact64(writer, s);
+            try writePadding(writer, s);
+        } else {
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            defer aw.deinit();
+
+            var s: u64 = 0;
+            while (true) {
+                const read = try reader.streamRemaining(&aw.writer);
+                if (read == 0) break;
+                s += read;
+            }
+            try writeStr(writer, aw.writer.buffered());
+        }
+
+        try Token.write(.archive_end, writer);
     }
 
     pub fn dumpSymlinkDirect(
         target: []const u8,
         writer: *std.Io.Writer,
     ) !void {
-        _ = .{ target, writer };
-        unreachable; // TODO
+        try Token.write(.magic, writer);
+        try Token.write(.symlink, writer);
+        try writeStr(writer, target);
+        try Token.write(.archive_end, writer);
     }
 
     pub fn dumpDirectoryDirect(
@@ -350,7 +375,7 @@ pub const NixArchive = struct {
                 while (nodes.len > dir_indicies.getLast() and nodes.len > 0) {
                     const cur = nodes.pop().?;
                     const name = cur.name;
-                    defer node_names.destroy(@alignCast(@ptrCast(name)));
+                    defer node_names.destroy(@ptrCast(@alignCast(name)));
 
                     try Token.write(.directory_entry, writer);
                     try writeStr(writer, name);
@@ -584,6 +609,7 @@ pub const NixArchive = struct {
         file,
         executable,
         contents,
+        next,
         read_file,
         directory,
     };
@@ -716,9 +742,78 @@ pub const NixArchive = struct {
             return if (self == .root) null else self.inner(archive).parent;
         }
 
-        pub fn subPath(self: Node, archive: NixArchive, subpath: []const u8) !Node {
-            _ = .{ self, archive, subpath };
-            unreachable; // TODO
+        pub const SubPathError = error{ OutsideArchive, NotDir, NestedTooDeep, FileNotFound };
+
+        pub fn subPath(self: Node, archive: NixArchive, subpath: []const u8) SubPathError!Node {
+            if (std.fs.path.sep != '/') @compileError("Path separator is not '/'");
+
+            var buf: [256][]const u8 = undefined;
+            var parts: std.ArrayList([]const u8) = .initBuffer(&buf);
+
+            var cur_node = self;
+
+            var iter_count: u16 = 0;
+
+            switch (cur_node.contents(archive)) {
+                .file, .directory => {},
+                .symlink => |target| {
+                    if (cur_node.parent(archive) != null)
+                        if (target[0] != '/')
+                            parts.appendAssumeCapacity(target)
+                        else
+                            return error.OutsideArchive;
+                },
+            }
+
+            parts.appendAssumeCapacity(subpath);
+
+            while (parts.items.len > 0 and iter_count < 1024) : (iter_count += 1) {
+                const part = parts.items[0];
+                if (part.len == 0) {
+                    _ = parts.orderedRemove(0);
+                    continue;
+                }
+
+                var iter = std.mem.splitScalar(u8, part, '/');
+
+                const first = iter.first();
+                parts.items[0] = iter.rest();
+
+                if (first.len == 0) continue;
+                if (std.mem.eql(u8, first, ".")) continue;
+
+                switch (cur_node.contents(archive)) {
+                    .symlink => cur_node = cur_node.parent(archive) orelse
+                        return error.OutsideArchive,
+                    .file => return error.NotDir,
+                    .directory => {},
+                }
+
+                if (std.mem.eql(u8, first, "..")) {
+                    cur_node = cur_node.inner(archive).parent;
+                    continue;
+                }
+
+                cur_node = cur_node.contents(archive).directory orelse return error.FileNotFound;
+                while (true) switch (std.mem.order(u8, cur_node.name(archive).?, first)) {
+                    .lt => if (cur_node.next(archive)) |n| {
+                        cur_node = n;
+                        continue;
+                    } else return error.FileNotFound,
+                    .eq => break,
+                    .gt => return error.FileNotFound,
+                };
+
+                if (cur_node.contents(archive) == .symlink) {
+                    const target = cur_node.contents(archive).symlink;
+                    if (std.mem.startsWith(u8, target, "/")) return error.OutsideArchive;
+                    parts.appendBounded(target) catch return error.NestedTooDeep;
+                }
+            }
+
+            if (iter_count >= 1024) return error.NestedTooDeep;
+
+            return cur_node;
         }
 
         pub fn contents(self: Node, archive: NixArchive) Kind.Tagged {
@@ -749,38 +844,6 @@ pub const NixArchive = struct {
             };
             if (data == .symlink)
                 try self.inner(archive.*).data.symlink.set(archive, data.symlink);
-        }
-    };
-
-    pub const Reader = struct {
-        archive: NixArchive,
-        state: State = .archive_start,
-        file_seek: u64 = 0,
-        current_node: Node = .root,
-        reader: std.Io.Reader,
-
-        fn stream(
-            r: *std.Io.Reader,
-            w: *std.Io.Writer,
-            limit: std.Io.Limit,
-        ) std.Io.Reader.StreamError!usize {
-            _ = .{ r, w, limit };
-            unreachable; // TODO
-        }
-
-        fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-            _ = .{ r, limit };
-            unreachable; // TODO
-        }
-
-        fn readVec(r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
-            _ = .{ r, data };
-            unreachable; // TODO
-        }
-
-        fn rebase(r: *std.Io.Reader, capacity: usize) std.Io.Reader.RebaseError!void {
-            _ = .{ r, capacity };
-            unreachable; // TODO
         }
     };
 };

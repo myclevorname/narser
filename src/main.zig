@@ -75,9 +75,10 @@ pub fn ls(writer: *std.Io.Writer, archive: NixArchive, root: NixArchive.Node, op
         {
             node = node.contents(archive).directory.?;
         } else {
-            while (node != root and node.next(archive) != null) {
+            while (node != root and node.next(archive) == null) {
                 node = node.parent(archive).?;
-            } else if (node == root) return;
+            }
+            if (node == root) return;
             node = node.next(archive).?;
         }
     }
@@ -105,7 +106,7 @@ fn printPath(
     var buf: [max_depth][]const u8 = undefined;
     const count: usize = blk: for (0..max_depth) |i| {
         buf[i] = if (cur != root) cur.name(archive).? else "";
-        cur = if (cur != root) cur.parent(archive).? else break :blk i;
+        cur = if (cur != root) cur.parent(archive).? else break :blk i + 1;
     } else return error.OutOfMemory;
 
     var iter = std.mem.reverseIterator(buf[0 .. count - 1]);
@@ -317,10 +318,10 @@ pub fn main() !void {
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
         const root = NixArchive.Node.subPath(.root, archive, subpath) catch |e| switch (e) {
-            // error.IsFile => fatal("In archive: expected directory, found file", .{}),
-            // error.FileNotFound => fatal("In archive: file not found", .{}),
-            // error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            // error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
+            error.NotDir => fatal("In archive: expected directory, found file", .{}),
+            error.FileNotFound => fatal("In archive: file not found", .{}),
+            error.OutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
         };
         try ls(writer, archive, root, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
@@ -342,10 +343,10 @@ pub fn main() !void {
         }
 
         const sub = NixArchive.Node.subPath(.root, archive, subpath) catch |e| switch (e) {
-            //error.IsFile => fatal("In archive: expected directory, found file", .{}),
-            //error.FileNotFound => fatal("In archive: file not found", .{}),
-            //error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            //error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
+            error.NotDir => fatal("In archive: expected directory, found file", .{}),
+            error.FileNotFound => fatal("In archive: file not found", .{}),
+            error.OutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
         };
 
         switch (sub.contents(archive)) {
