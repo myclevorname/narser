@@ -13,7 +13,7 @@ DO NOT run on a filesystem with case-insensitive file names as that allows an at
 
 Narser simultaneously targets the latest stable and nightly releases of Zig.
 If it fails to build on either, that is a bug.
-Due to 0.15.0 releasing soon, only the latest nightly is supported.
+Due to the Iogate situation with 0.16.0, narser will only target the latest stable for now.
 
 ## TODO
 
