@@ -56,7 +56,17 @@ pub fn build(b: *std.Build) void {
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
+    const fmt_check = b.addFmt(.{
+        .paths = &.{
+            "build.zig",
+            "src/root.zig",
+            "src/main.zig",
+        },
+        .check = true,
+    });
+
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&fmt_check.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_narser_unit_tests.step);
 }

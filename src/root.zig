@@ -407,143 +407,143 @@ pub const NarArchive = struct {
 
 /// Takes a directory and serializes it as a Nix Archive into `writer`. This is faster and more
 /// memory-efficient than calling `fromDirectory` followed by `dump`.
-    pub fn dumpDirectory(
-        allocator: std.mem.Allocator,
-        dir: std.fs.Dir,
-        writer: *std.Io.Writer,
-    ) !void {
-        // Idea: Make a list of nodes sorted by least depth to most depth, followed by names sorted
-        // in reverse. Reading the next node is as easy as popping. `dir_indicies` is to keep track
-        // of where the contents of each directory end.
+pub fn dumpDirectory(
+    allocator: std.mem.Allocator,
+    dir: std.fs.Dir,
+    writer: *std.Io.Writer,
+) !void {
+    // Idea: Make a list of nodes sorted by least depth to most depth, followed by names sorted
+    // in reverse. Reading the next node is as easy as popping. `dir_indicies` is to keep track
+    // of where the contents of each directory end.
 
-        var node_names: std.heap.MemoryPool([std.fs.max_path_bytes]u8) = .init(allocator);
-        defer node_names.deinit();
+    var node_names: std.heap.MemoryPool([std.fs.max_path_bytes]u8) = .init(allocator);
+    defer node_names.deinit();
 
-        var nodes: std.MultiArrayList(struct {
-            kind: enum { directory, file, symlink },
-            name: []u8,
-        }) = .empty;
-        defer nodes.deinit(allocator);
+    var nodes: std.MultiArrayList(struct {
+        kind: enum { directory, file, symlink },
+        name: []u8,
+    }) = .empty;
+    defer nodes.deinit(allocator);
 
-        var dirs: std.ArrayList(std.fs.Dir.Iterator) = try .initCapacity(allocator, 1);
-        defer dirs.deinit(allocator);
-        errdefer for (dirs.items[1..]) |*d| d.dir.close();
+    var dirs: std.ArrayList(std.fs.Dir.Iterator) = try .initCapacity(allocator, 1);
+    defer dirs.deinit(allocator);
+    errdefer for (dirs.items[1..]) |*d| d.dir.close();
 
-        var dir_indicies: std.ArrayList(usize) = .empty;
-        defer dir_indicies.deinit(allocator);
+    var dir_indicies: std.ArrayList(usize) = .empty;
+    defer dir_indicies.deinit(allocator);
 
-        dirs.appendAssumeCapacity(dir.iterate());
+    dirs.appendAssumeCapacity(dir.iterate());
 
-        const Scan = enum { scan_directory, print };
+    const Scan = enum { scan_directory, print };
 
-        try writeTokens(writer, &.{.magic, .directory});
+    try writeTokens(writer, &.{ .magic, .directory });
 
-        loop: switch (Scan.scan_directory) {
-            .scan_directory => {
-                try dir_indicies.append(allocator, nodes.len);
-                var last_iter = &dirs.items[dirs.items.len - 1];
-                while (try last_iter.next()) |entry| {
-                    try nodes.append(allocator, .{
-                        .name = blk: {
-                            var name = try node_names.create();
-                            @memcpy(name[0..entry.name.len], entry.name);
-                            break :blk name[0..entry.name.len];
-                        },
-                        .kind = switch (entry.kind) {
-                            .sym_link => .symlink,
-                            .directory => .directory,
-                            else => .file,
-                        },
-                    });
+    loop: switch (Scan.scan_directory) {
+        .scan_directory => {
+            try dir_indicies.append(allocator, nodes.len);
+            var last_iter = &dirs.items[dirs.items.len - 1];
+            while (try last_iter.next()) |entry| {
+                try nodes.append(allocator, .{
+                    .name = blk: {
+                        var name = try node_names.create();
+                        @memcpy(name[0..entry.name.len], entry.name);
+                        break :blk name[0..entry.name.len];
+                    },
+                    .kind = switch (entry.kind) {
+                        .sym_link => .symlink,
+                        .directory => .directory,
+                        else => .file,
+                    },
+                });
+            }
+            nodes.sortSpanUnstable(dir_indicies.getLast(), nodes.len, struct {
+                names: []const []const u8,
+
+                pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                    return std.mem.order(
+                        u8,
+                        ctx.names[a],
+                        ctx.names[b],
+                    ) == .gt;
                 }
-                nodes.sortSpanUnstable(dir_indicies.getLast(), nodes.len, struct {
-                    names: []const []const u8,
+            }{ .names = nodes.items(.name) });
+            continue :loop .print;
+        },
+        .print => {
+            while (nodes.len > dir_indicies.getLast() and nodes.len > 0) {
+                const cur = nodes.pop().?;
+                const name = cur.name;
+                defer node_names.destroy(@ptrCast(@alignCast(name)));
 
-                    pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-                        return std.mem.order(
-                            u8,
-                            ctx.names[a],
-                            ctx.names[b],
-                        ) == .gt;
-                    }
-                }{ .names = nodes.items(.name) });
-                continue :loop .print;
-            },
-            .print => {
-                while (nodes.len > dir_indicies.getLast() and nodes.len > 0) {
-                    const cur = nodes.pop().?;
-                    const name = cur.name;
-                    defer node_names.destroy(@ptrCast(@alignCast(name)));
+                try writeTokens(writer, &.{.directory_entry});
+                try writeStr(writer, name);
+                try writeTokens(writer, &.{.directory_entry_inner});
+                switch (cur.kind) {
+                    .directory => {
+                        try writeTokens(writer, &.{.directory});
+                        try dirs.ensureUnusedCapacity(allocator, 1);
+                        const d = try dirs.getLast().dir.openDir(name, .{ .iterate = true });
+                        dirs.appendAssumeCapacity(d.iterateAssumeFirstIteration());
+                        continue :loop .scan_directory;
+                    },
+                    .file => {
+                        try writeTokens(writer, &.{.file});
+                        var file = try dirs.getLast().dir.openFile(name, .{});
+                        defer file.close();
+                        if (try file.mode() & 0o111 != 0)
+                            try writeTokens(writer, &.{.executable_file});
+                        try writeTokens(writer, &.{.file_contents});
 
-                    try writeTokens(writer, &.{.directory_entry});
-                    try writeStr(writer, name);
-                    try writeTokens(writer, &.{.directory_entry_inner});
-                    switch (cur.kind) {
-                        .directory => {
-                            try writeTokens(writer, &.{.directory});
-                            try dirs.ensureUnusedCapacity(allocator, 1);
-                            const d = try dirs.getLast().dir.openDir(name, .{ .iterate = true });
-                            dirs.appendAssumeCapacity(d.iterateAssumeFirstIteration());
-                            continue :loop .scan_directory;
-                        },
-                        .file => {
-                            try writeTokens(writer, &.{.file});
-                            var file = try dirs.getLast().dir.openFile(name, .{});
-                            defer file.close();
-                            if (try file.mode() & 0o111 != 0)
-                                try writeTokens(writer, &.{.executable_file});
-                            try writeTokens(writer, &.{.file_contents});
+                        var buf: [4096]u8 = undefined;
+                        var fw = file.reader(&buf);
 
-                            var buf: [4096]u8 = undefined;
-                            var fw = file.reader(&buf);
-
-                            if (fw.getSize()) |size| {
-                                try writer.writeInt(u64, size, .little);
-                                var left = size;
-                                while (left != 0) {
-                                    const read = try writer.sendFileAll(&fw, .limited64(size));
-                                    left -= read;
-                                    if (read == 0 and left != 0) return error.EndOfStream;
-                                }
-                                try writePadding(writer, size);
-                            } else |_| {
-                                @branchHint(.unlikely);
-                                var aw: std.Io.Writer.Allocating = .init(allocator);
-                                defer aw.deinit();
-
-                                while (try aw.writer.sendFileAll(&fw, .unlimited) != 0) {}
-                                const size = aw.writer.buffered().len;
-                                try writer.writeInt(u64, size, .little);
-                                try writer.writeAll(aw.writer.buffered());
-                                try writePadding(writer, size);
+                        if (fw.getSize()) |size| {
+                            try writer.writeInt(u64, size, .little);
+                            var left = size;
+                            while (left != 0) {
+                                const read = try writer.sendFileAll(&fw, .limited64(size));
+                                left -= read;
+                                if (read == 0 and left != 0) return error.EndOfStream;
                             }
-                        },
-                        .symlink => {
-                            try writeTokens(writer, &.{.symlink});
-                            var buf: [std.fs.max_path_bytes]u8 = undefined;
-                            const link = dirs.getLast().dir.readLink(name, &buf) catch |e|
-                                switch (e) {
-                                    error.NameTooLong => unreachable,
-                                    else => return e,
-                                };
-                            try writeStr(writer, link);
-                        },
-                    }
+                            try writePadding(writer, size);
+                        } else |_| {
+                            @branchHint(.unlikely);
+                            var aw: std.Io.Writer.Allocating = .init(allocator);
+                            defer aw.deinit();
 
-                    try writeTokens(writer, &.{.directory_entry_end});
-                } else {
-                    if (dirs.items.len == 1) break :loop;
-                    try writeTokens(writer, &.{.directory_entry_end});
-                    _ = dir_indicies.pop().?;
-                    var d = dirs.pop().?;
-                    d.dir.close();
-                    continue :loop .print;
+                            while (try aw.writer.sendFileAll(&fw, .unlimited) != 0) {}
+                            const size = aw.writer.buffered().len;
+                            try writer.writeInt(u64, size, .little);
+                            try writer.writeAll(aw.writer.buffered());
+                            try writePadding(writer, size);
+                        }
+                    },
+                    .symlink => {
+                        try writeTokens(writer, &.{.symlink});
+                        var buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const link = dirs.getLast().dir.readLink(name, &buf) catch |e|
+                            switch (e) {
+                                error.NameTooLong => unreachable,
+                                else => return e,
+                            };
+                        try writeStr(writer, link);
+                    },
                 }
-            },
-        }
 
-        try writeTokens(writer, &.{.archive_end});
+                try writeTokens(writer, &.{.directory_entry_end});
+            } else {
+                if (dirs.items.len == 1) break :loop;
+                try writeTokens(writer, &.{.directory_entry_end});
+                _ = dir_indicies.pop().?;
+                var d = dirs.pop().?;
+                d.dir.close();
+                continue :loop .print;
+            }
+        },
     }
+
+    try writeTokens(writer, &.{.archive_end});
+}
 
 /// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
 /// memory-efficient than calling `fromFileContents` followed by `dump`.
