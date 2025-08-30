@@ -420,7 +420,7 @@ pub fn dumpDirectory(
     defer node_names.deinit();
 
     var nodes: std.MultiArrayList(struct {
-        kind: enum { directory, file, symlink },
+        kind: std.meta.Tag(Object.Data),
         name: []u8,
     }) = .empty;
     defer nodes.deinit(allocator);
@@ -588,6 +588,271 @@ pub fn dumpSymlink(target: []const u8, writer: *std.Io.Writer) !void {
     try writeTokens(writer, &.{.archive_end});
 }
 
+pub fn unpackDirDirect(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    out_dir: std.fs.Dir,
+) !void {
+    std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
+
+    var currents: std.MultiArrayList(struct {
+        name_buf: [std.fs.max_path_bytes]u8 = undefined,
+        last_name_len: ?u64 = null,
+        dir: std.fs.Dir,
+    }) = .empty;
+    defer currents.deinit(allocator);
+
+    defer if (currents.len > 1) for (currents.items(.dir)[1..]) |*d| d.close();
+
+    try currents.append(allocator, .{ .dir = out_dir });
+
+    const State = enum { directory_entry, directory, file, symlink, end, leave_directory };
+
+    expectTokenReader(reader, .magic) catch |e| switch (e) {
+        error.InvalidFormat => return error.NotANar,
+        error.ReadFailed, error.EndOfStream => return e,
+    };
+
+    expectTokenReader(reader, .directory) catch |e| switch (e) {
+        error.InvalidFormat => return error.WrongArchiveType,
+        error.ReadFailed, error.EndOfStream => return e,
+    };
+
+    state: switch (State.directory_entry) {
+        .directory_entry => {
+            expectTokenReader(reader, .directory_entry) catch |e| switch (e) {
+                error.InvalidFormat => continue :state .leave_directory,
+                else => return e,
+            };
+
+            const len = try reader.takeInt(u64, .little);
+            switch (len) {
+                0 => return error.NameTooSmall,
+                1...std.fs.max_path_bytes => {},
+                else => return error.NameTooLarge,
+            }
+
+            const name = try reader.take(len);
+            if (std.mem.indexOfScalar(u8, name, 0) != null or
+                std.mem.indexOfScalar(u8, name, '/') != null or
+                std.mem.eql(u8, name, ".") or
+                std.mem.eql(u8, name, ".."))
+            {
+                return error.MaliciousArchive;
+            }
+
+            const cur = currents.get(currents.len - 1);
+            if (cur.last_name_len) |l| switch (std.mem.order(u8, cur.name_buf[0..l], name)) {
+                .lt => {},
+                .eq => return error.DuplicateObjectName,
+                .gt => {
+                    return error.WrongDirectoryOrder;
+                },
+            };
+
+            var name_buf: [std.fs.max_path_bytes]u8 = @splat('A');
+            @memcpy(name_buf[0..name.len], name);
+
+            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                return error.InvalidFormat;
+
+            currents.set(
+                currents.len - 1,
+                .{ .name_buf = name_buf, .dir = cur.dir, .last_name_len = len },
+            );
+
+            try expectTokenReader(reader, .directory_entry_inner);
+
+            const file_string = getTokenString(.file);
+            const directory_string = getTokenString(.directory);
+            const symlink_string = getTokenString(.symlink);
+            if (std.mem.eql(u8, file_string, try reader.peek(file_string.len)))
+                continue :state .file
+            else if (std.mem.eql(u8, directory_string, try reader.peek(directory_string.len)))
+                continue :state .directory
+            else if (std.mem.eql(u8, symlink_string, try reader.peek(symlink_string.len)))
+                continue :state .symlink
+            else
+                return error.InvalidFormat;
+        },
+        .file => {
+            expectTokenReader(reader, .file) catch unreachable;
+            const exec_token = comptime getTokenString(.executable_file);
+            const is_executable = std.mem.eql(u8, try reader.peek(exec_token.len), exec_token);
+            if (is_executable) reader.toss(exec_token.len);
+
+            try expectTokenReader(reader, .file_contents);
+
+            const size = try reader.takeInt(u64, .little);
+
+            const cur = currents.get(currents.len - 1);
+
+            var file = try cur.dir.createFile(
+                cur.name_buf[0..cur.last_name_len.?],
+                .{ .mode = if (is_executable) 0o777 else 0o666 },
+            );
+            defer file.close();
+
+            var fw_buf: [4096 * 8]u8 = undefined;
+            var fw = file.writer(&fw_buf);
+            try reader.streamExact64(&fw.interface, size);
+            try fw.interface.flush();
+
+            if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+                return error.InvalidFormat;
+
+            try expectTokenReader(reader, .directory_entry_end);
+
+            continue :state .directory_entry;
+        },
+        .symlink => {
+            expectTokenReader(reader, .symlink) catch unreachable;
+
+            const size = try reader.takeInt(u64, .little);
+            switch (size) {
+                0 => return error.NameTooSmall,
+                1...std.fs.max_path_bytes => {},
+                else => return error.NameTooLarge,
+            }
+
+            const cur = currents.get(currents.len - 1);
+            const target = try reader.take(size);
+            if (std.mem.indexOfScalar(u8, target, 0) != null) return error.InvalidToken;
+
+            cur.dir.symLink(target, cur.name_buf[0..cur.last_name_len.?], .{}) catch |e| switch (e) {
+                error.PathAlreadyExists => {},
+                else => return e,
+            };
+
+            if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+                return error.InvalidFormat;
+
+            try expectTokenReader(reader, .directory_entry_end);
+
+            continue :state .directory_entry;
+        },
+        .directory => {
+            expectTokenReader(reader, .directory) catch unreachable;
+
+            const cur = currents.get(currents.len - 1);
+
+            const entry_string = getTokenString(.directory_entry);
+
+            const has_children = std.mem.eql(u8, try reader.peek(entry_string.len), entry_string);
+
+            try currents.ensureUnusedCapacity(allocator, 1);
+
+            const child_name = cur.name_buf[0..cur.last_name_len.?];
+
+            cur.dir.makeDir(child_name) catch |e| switch (e) {
+                error.PathAlreadyExists => {},
+                else => return e,
+            };
+            if (has_children) {
+                const child = try cur.dir.openDir(child_name, .{});
+                currents.appendAssumeCapacity(.{ .dir = child });
+            } else try expectTokenReader(reader, .directory_entry_end);
+            continue :state .directory_entry;
+        },
+        .leave_directory => {
+            if (currents.len == 1)
+                continue :state .end
+            else {
+                try expectTokenReader(reader, .directory_entry_end);
+                var cur = currents.pop().?;
+                cur.dir.close();
+                continue :state .directory_entry;
+            }
+        },
+        .end => {
+            try expectTokenReader(reader, .archive_end);
+            return;
+        },
+    }
+    comptime unreachable;
+
+    // TODO TODO TODO TODO TODO TODO
+    // TODO TODO TODO TODO TODO TODO
+}
+
+/// Returns whether the file is executable
+pub fn unpackFileDirect(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
+    expectTokenReader(reader, .magic) catch |e| switch (e) {
+        error.InvalidFormat => return error.NotANar,
+        error.ReadFailed, error.EndOfStream => return e,
+    };
+
+    try expectTokenReader(reader, .file);
+
+    const exec_token = getTokenString(.executable_file);
+
+    const is_executable = if (std.mem.eql(u8, try reader.peek(exec_token.len), exec_token)) blk: {
+        reader.toss(exec_token.len);
+        break :blk true;
+    } else false;
+
+    try expectTokenReader(reader, .file_contents);
+
+    const size = try reader.takeInt(u64, .little);
+    try reader.streamExact64(writer, size);
+
+    if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+        return error.InvalidFormat;
+
+    try expectTokenReader(reader, .archive_end);
+    return is_executable;
+}
+
+pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
+    expectTokenReader(reader, .magic) catch |e| switch (e) {
+        error.InvalidFormat => return error.NotANar,
+        error.ReadFailed, error.EndOfStream => return e,
+    };
+
+    try expectTokenReader(reader, .symlink);
+
+    const size = try reader.takeInt(u64, .little);
+    switch (size) {
+        0 => return error.NameTooSmall,
+        1...std.fs.max_path_bytes => {},
+        else => return error.NameTooLarge,
+    }
+
+    @memcpy(buf[0..size], try reader.take(size));
+
+    if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+        return error.InvalidFormat;
+
+    try expectTokenReader(reader, .archive_end);
+    return buf[0..size];
+}
+
+pub fn archiveType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
+    const magic = comptime getTokenString(.magic);
+    const file = comptime getTokenString(.file);
+    const directory = comptime getTokenString(.directory);
+    const symlink = comptime getTokenString(.symlink);
+
+    if (!std.mem.eql(u8, try reader.peek(magic.len), magic)) return error.NotANar;
+
+    if (std.mem.eql(u8, try reader.peek(magic.len + file.len), magic ++ file))
+        return .file
+    else if (std.mem.eql(
+        u8,
+        try reader.peek(magic.len + directory.len),
+        magic ++ directory,
+    ))
+        return .directory
+    else if (std.mem.eql(
+        u8,
+        try reader.peek(magic.len + symlink.len),
+        magic ++ symlink,
+    ))
+        return .symlink
+    else
+        return error.InvalidFormat;
+}
+
 pub const Object = struct {
     entry: ?DirectoryEntry,
     data: Data,
@@ -742,6 +1007,18 @@ fn expectToken(slice: *[]u8, comptime token: Token) !void {
     }
 }
 
+fn expectTokenReader(reader: *std.Io.Reader, comptime token: Token) !void {
+    const taken = reader.peek(getTokenString(token).len) catch |e| switch (e) {
+        error.EndOfStream => return error.InvalidFormat,
+        else => return e,
+    };
+
+    if (!std.mem.eql(u8, getTokenString(token), taken))
+        return error.InvalidFormat;
+
+    reader.toss(getTokenString(token).len);
+}
+
 fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
     comptime var concatenated: []const u8 = "";
 
@@ -793,7 +1070,11 @@ fn writeStr(writer: *std.Io.Writer, string: []const u8) !void {
 }
 
 fn writePadding(writer: *std.Io.Writer, size: u64) !void {
-    try writer.splatByteAll(0, (-%size) & 7);
+    try writer.splatByteAll(0, padding(size));
+}
+
+fn padding(size: u64) u3 {
+    return @truncate(-%size);
 }
 
 fn str(comptime string: anytype) []const u8 {

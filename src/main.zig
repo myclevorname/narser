@@ -318,32 +318,43 @@ pub fn main() !void {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
 
-        const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
-        defer allocator.free(contents);
+        var file = try std.fs.cwd().openFile(archive_path, .{});
+        defer file.close();
+        var fbuf: [4096 * 8]u8 = undefined;
+        var fr = file.reader(&fbuf);
+        const reader = &fr.interface;
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
-        defer archive.deinit();
+        const kind = narser.archiveType(reader) catch |e| switch (e) {
+            error.NotANar => fatal("File is not a Nix archive", .{}),
+            else => return e,
+        };
 
         const target_path = if (processed_args.items.len < 3) null else processed_args.items[2];
 
-        switch (archive.root.data) {
+        switch (kind) {
             .directory => {
                 var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
                 defer dir.close();
-                try archive.unpackDir(dir);
+                try narser.unpackDirDirect(allocator, reader, dir);
             },
-            .file => |metadata| if (target_path == null or std.mem.eql(u8, "-", target_path.?))
-                try writer.writeAll(metadata.contents)
-            else
-                try std.fs.cwd().writeFile(.{
-                    .sub_path = target_path.?,
-                    .data = metadata.contents,
-                    .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
-                }),
-            .symlink => |target| if (target_path) |path|
-                try std.fs.cwd().symLink(target, path, .{})
-            else
-                fatal("Target path required", .{}),
+            .file => if (target_path == null or std.mem.eql(u8, "-", target_path.?)) {
+                _ = try narser.unpackFileDirect(reader, writer);
+            } else {
+                var out = try std.fs.cwd().createFile(target_path.?, .{});
+                defer out.close();
+                var w = out.writer(&.{});
+
+                const exec = try narser.unpackFileDirect(reader, &w.interface);
+                try file.chmod(if (exec) 0o777 else 0o666);
+            },
+            .symlink => if (target_path) |path| {
+                var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                try std.fs.cwd().symLink(
+                    try narser.unpackSymlinkDirect(reader, &path_buf),
+                    path,
+                    .{},
+                );
+            } else fatal("Target path required", .{}),
         }
     } else fatal("Invalid command '{s}'", .{command});
 
