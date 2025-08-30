@@ -650,16 +650,12 @@ pub fn unpackDirDirect(
                 },
             };
 
-            var name_buf: [std.fs.max_path_bytes]u8 = @splat('A');
-            @memcpy(name_buf[0..name.len], name);
+            @memcpy(currents.items(.name_buf)[currents.len - 1][0..len], name);
 
             if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
                 return error.InvalidFormat;
 
-            currents.set(
-                currents.len - 1,
-                .{ .name_buf = name_buf, .dir = cur.dir, .last_name_len = len },
-            );
+            currents.items(.last_name_len)[currents.len - 1] = len;
 
             try expectTokenReader(reader, .directory_entry_inner);
 
