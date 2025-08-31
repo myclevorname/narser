@@ -222,11 +222,10 @@ pub fn main() !void {
     const command = processed_args.items[0];
     if (std.mem.eql(u8, "pack", command) or std.mem.eql(u8, "hash", command)) {
         const use_hasher = std.mem.eql(u8, "hash", command);
-        var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
 
         var hash_buffer: [2048]u8 = undefined;
-        var hash_upd = hasher.writer().adaptToNewApi(&hash_buffer);
-        const used_writer = if (use_hasher) &hash_upd.new_interface else writer;
+        var hash_upd: std.Io.Writer.Hashing(std.crypto.hash.sha2.Sha256) = .init(&hash_buffer);
+        const used_writer = if (use_hasher) &hash_upd.writer else writer;
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
@@ -256,7 +255,7 @@ pub fn main() !void {
 
         if (use_hasher) {
             used_writer.flush() catch unreachable;
-            const sha256_hash = hasher.finalResult();
+            const sha256_hash = hash_upd.hasher.finalResult();
             var base64_hash: [44]u8 = undefined;
 
             _ = std.base64.standard.Encoder.encode(&base64_hash, &sha256_hash);
@@ -266,14 +265,19 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, "ls", command)) {
         var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
-        const contents = try std.fs.cwd().readFileAlloc(
-            allocator,
-            argument,
-            std.math.maxInt(usize),
-        );
-        defer allocator.free(contents);
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
+        var in_file = try std.fs.cwd().openFile(argument, .{});
+        defer in_file.close();
+
+        var in_buf: [4096]u8 = undefined;
+        var in_reader = in_file.reader(&in_buf);
+
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+
+        while (try in_reader.interface.streamRemaining(&aw.writer) != 0) {}
+
+        var archive = try narser.NarArchive.fromSlice(allocator, aw.written());
         defer archive.deinit();
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
@@ -290,10 +294,18 @@ pub fn main() !void {
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
-        const contents = try std.fs.cwd().readFileAlloc(allocator, archive_path, std.math.maxInt(usize));
-        defer allocator.free(contents);
+        var in_file = try std.fs.cwd().openFile(archive_path, .{});
+        defer in_file.close();
 
-        var archive = try narser.NarArchive.fromSlice(allocator, contents);
+        var in_buf: [4096]u8 = undefined;
+        var in_reader = in_file.reader(&in_buf);
+
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        defer aw.deinit();
+
+        while (try in_reader.interface.streamRemaining(&aw.writer) != 0) {}
+
+        var archive = try narser.NarArchive.fromSlice(allocator, aw.written());
         defer archive.deinit();
 
         switch (archive.root.data) {
