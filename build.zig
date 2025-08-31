@@ -6,8 +6,8 @@ pub fn build(b: *std.Build) void {
     const use_llvm = b.option(bool, "use-llvm", "Use the LLVM backend");
     const strip = b.option(bool, "strip", "Remove debugging symbols");
 
-    if (target.result.os.tag == .windows)
-        @panic("Windows does not support the file executable attribute. Try using WSL.");
+    if (target.result.os.tag == .windows or target.result.os.tag == .wasi)
+        @panic("Target OS does not support the executable file attribute.");
 
     const narser = b.addModule("narser", .{
         .root_source_file = b.path("src/root.zig"),

@@ -7,13 +7,15 @@ However, the `hash` subcommand is somewhat slower than `nix hash path`.
 NOTE: Not to be confused with the [Narser](https://github.com/Nacorpio/Narser) parser generator, which is 9 years old.
 See also [narz](https://github.com/water-sucks/narz), another Zig-based alternative.
 
-DO NOT run on a filesystem with case-insensitive file names as that allows an attacker to write to arbitrary files with the same permissions as the invoking user.
+WARNING: DO NOT run on a filesystem with case-insensitive file names as that allows an attacker to write to arbitrary files with the same permissions as the invoking user.
+Narser does not and will not support Nix's case-hacking on MacOS.
 
 ## Building
 
-Narser simultaneously targets the latest stable and nightly releases of Zig.
-If it fails to build on either, that is a bug.
-Due to the Iogate situation with 0.16.0, narser will only target the latest stable for now.
+Narser targets the latest Zig version: 0.15.1.
+
+For release builds, Nix is used.
+The `fast` and `small` packages have little to no benefit and are only included for completeness.
 
 ## TODO
 

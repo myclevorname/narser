@@ -1,6 +1,6 @@
 zig-out/
 .zig-cache/
-result
+result*
 
 # my test subject
 /linux

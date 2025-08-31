@@ -1,96 +1,147 @@
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ nix build nixpkgs#nixVersions.latest -o nix --print-out-paths
-/nix/store/r36d4dm29i5pbghrs595n3mqffyp9mgy-nix-2.30.2-man
-/nix/store/9y2fzymgsnmyyw3h0828k1sdg61h2y67-nix-2.30.2
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ rm nix-man
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ rm -rf linux/
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ git clone --depth=1 https://github.com/torvalds/linux
+[clevor@clevor-laptop-nixos:/tmp/clevor]$ mkdir test
+[clevor@clevor-laptop-nixos:/tmp/clevor]$ cd test
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ nix shell github:myclevorname/narser/d5990886b3af7eb081a2fdba41a3c8c08e7372d9 github:NixOS/nix/18c3d2348f59032f1c630e6a232fe3637efb8200
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ git clone https://github.com/torvalds/linux --depth=1
 Cloning into 'linux'...
-remote: Enumerating objects: 95889, done.
-remote: Counting objects: 100% (95889/95889), done.
-remote: Compressing objects: 100% (85853/85853), done.
-remote: Total 95889 (delta 10086), reused 70946 (delta 9021), pack-reused 0 (from 0)
-Receiving objects: 100% (95889/95889), 265.57 MiB | 8.49 MiB/s, done.
-Resolving deltas: 100% (10086/10086), done.
+remote: Enumerating objects: 95867, done.
+remote: Counting objects: 100% (95867/95867), done.
+remote: Compressing objects: 100% (85837/85837), done.
+remote: Total 95867 (delta 10066), reused 70884 (delta 9015), pack-reused 0 (from 0)
+Receiving objects: 100% (95867/95867), 265.56 MiB | 16.73 MiB/s, done.
+Resolving deltas: 100% (10066/10066), done.
 Updating files: 100% (90500/90500), done.
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ nix build . -o safe
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ nix build .#fast -o fast
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ nix build .#small -o small
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ cmp <(./nix/bin/nix nar pack linux) <(./safe/bin/narser pack linux)
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ cmp <(./nix/bin/nix nar pack linux) <(./small/bin/narser pack linux)
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ cmp <(./nix/bin/nix nar pack linux) <(./fast/bin/narser pack linux)
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ poop "./nix/bin/nix nar pack linux" "./safe/bin/narser pack linux" "./fast/bin/narser pack linux" "./small/bin/narser pack linux"
-Benchmark 1 (3 runs): ./nix/bin/nix nar pack linux
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cmp <(nix nar pack linux) <(narser pack linux)
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ poop "nix nar pack linux" "narser pack linux"
+Benchmark 1 (3 runs): nix nar pack linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          2.24s  ± 9.14ms    2.23s  … 2.25s           0 ( 0%)        0%
-  peak_rss           40.3MB ±  203KB    40.1MB … 40.5MB          0 ( 0%)        0%
-  cpu_cycles         4.46G  ± 10.1M     4.45G  … 4.47G           0 ( 0%)        0%
-  instructions       9.55G  ± 11.8K     9.55G  … 9.55G           0 ( 0%)        0%
-  cache_references   61.8M  ±  655K     61.3M  … 62.5M           0 ( 0%)        0%
-  cache_misses       5.04M  ±  107K     4.93M  … 5.15M           0 ( 0%)        0%
-  branch_misses      12.6M  ±  171K     12.4M  … 12.8M           0 ( 0%)        0%
-Benchmark 2 (7 runs): ./safe/bin/narser pack linux
+  wall_time          1.90s  ± 6.63ms    1.90s  … 1.91s           0 ( 0%)        0%
+  peak_rss           41.1MB ±  125KB    41.0MB … 41.2MB          0 ( 0%)        0%
+  cpu_cycles         3.42G  ± 19.1M     3.40G  … 3.44G           0 ( 0%)        0%
+  instructions       7.36G  ±  340K     7.36G  … 7.36G           0 ( 0%)        0%
+  cache_references   61.0M  ± 2.19M     58.9M  … 63.3M           0 ( 0%)        0%
+  cache_misses       4.38M  ± 49.7K     4.34M  … 4.43M           0 ( 0%)        0%
+  branch_misses      8.86M  ±  390K     8.62M  … 9.31M           0 ( 0%)        0%
+Benchmark 2 (7 runs): narser pack linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           806ms ± 4.45ms     803ms …  816ms          0 ( 0%)        ⚡- 64.1% ±  0.4%
-  peak_rss           7.05MB ± 64.0KB    6.96MB … 7.09MB          0 ( 0%)        ⚡- 82.5% ±  0.5%
-  cpu_cycles          354M  ± 3.30M      352M  …  362M           0 ( 0%)        ⚡- 92.1% ±  0.2%
-  instructions        547M  ±  182       547M  …  547M           0 ( 0%)        ⚡- 94.3% ±  0.0%
-  cache_references   30.4M  ±  712K     29.0M  … 31.4M           0 ( 0%)        ⚡- 50.8% ±  1.8%
-  cache_misses       3.74M  ±  194K     3.48M  … 3.97M           0 ( 0%)        ⚡- 25.7% ±  5.6%
-  branch_misses      1.60M  ± 7.39K     1.59M  … 1.62M           0 ( 0%)        ⚡- 87.3% ±  1.1%
-Benchmark 3 (7 runs): ./fast/bin/narser pack linux
+  wall_time           785ms ± 1.87ms     783ms …  789ms          0 ( 0%)        ⚡- 58.7% ±  0.3%
+  peak_rss           7.06MB ± 64.0KB    6.96MB … 7.09MB          0 ( 0%)        ⚡- 82.8% ±  0.3%
+  cpu_cycles          331M  ± 1.38M      329M  …  332M           0 ( 0%)        ⚡- 90.3% ±  0.4%
+  instructions        519M  ±  242       519M  …  519M           0 ( 0%)        ⚡- 92.9% ±  0.0%
+  cache_references   25.6M  ±  424K     25.1M  … 26.3M           0 ( 0%)        ⚡- 58.0% ±  3.0%
+  cache_misses       3.21M  ± 63.6K     3.10M  … 3.29M           0 ( 0%)        ⚡- 26.6% ±  2.2%
+  branch_misses      1.12M  ± 3.02K     1.12M  … 1.12M           0 ( 0%)        ⚡- 87.4% ±  3.5%
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cmp <(nix hash path linux) <(narser hash linux)
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ poop "nix hash path linux" "narser hash linux"
+Benchmark 1 (3 runs): nix hash path linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           749ms ± 2.11ms     747ms …  753ms          0 ( 0%)        ⚡- 66.6% ±  0.3%
-  peak_rss           6.80MB ± 49.5KB    6.68MB … 6.82MB          1 (14%)        ⚡- 83.1% ±  0.4%
-  cpu_cycles          169M  ± 1.89M      166M  …  172M           0 ( 0%)        ⚡- 96.2% ±  0.2%
-  instructions        239M  ±  121       239M  …  239M           0 ( 0%)        ⚡- 97.5% ±  0.0%
-  cache_references   8.59M  ±  377K     8.16M  … 9.12M           0 ( 0%)        ⚡- 86.1% ±  1.2%
-  cache_misses       1.36M  ± 16.3K     1.34M  … 1.37M           0 ( 0%)        ⚡- 73.0% ±  1.8%
-  branch_misses      1.01M  ± 2.12K     1.01M  … 1.01M           0 ( 0%)        ⚡- 92.0% ±  1.1%
-Benchmark 4 (7 runs): ./small/bin/narser pack linux
+  wall_time          6.03s  ± 69.7ms    5.95s  … 6.08s           0 ( 0%)        0%
+  peak_rss           41.1MB ± 82.4KB    41.1MB … 41.2MB          0 ( 0%)        0%
+  cpu_cycles         17.9G  ±  238M     17.6G  … 18.0G           0 ( 0%)        0%
+  instructions       58.7G  ±  157K     58.7G  … 58.7G           0 ( 0%)        0%
+  cache_references   87.8M  ± 5.43M     82.9M  … 93.6M           0 ( 0%)        0%
+  cache_misses       4.64M  ± 38.4K     4.61M  … 4.68M           0 ( 0%)        0%
+  branch_misses      14.8M  ± 5.33M     8.63M  … 18.2M           0 ( 0%)        0%
+Benchmark 2 (3 runs): narser hash linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           788ms ± 9.35ms     783ms …  809ms          0 ( 0%)        ⚡- 64.9% ±  0.7%
-  peak_rss           6.82MB ±    0      6.82MB … 6.82MB          0 ( 0%)        ⚡- 83.1% ±  0.4%
-  cpu_cycles          279M  ± 5.86M      275M  …  292M           0 ( 0%)        ⚡- 93.7% ±  0.3%
-  instructions        332M  ±  310       332M  …  332M           0 ( 0%)        ⚡- 96.5% ±  0.0%
-  cache_references   11.2M  ±  341K     10.7M  … 11.6M           0 ( 0%)        ⚡- 81.9% ±  1.1%
-  cache_misses       1.52M  ±  235K     1.35M  … 2.03M           0 ( 0%)        ⚡- 69.8% ±  6.6%
-  branch_misses      1.21M  ± 3.03K     1.21M  … 1.21M           0 ( 0%)        ⚡- 90.4% ±  1.1%
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ poop "./nix/bin/nix hash path linux" "./safe/bin/narser hash linux" "./fast/bin/narser hash linux" "./small/bin/narser hash linux"
-Benchmark 1 (3 runs): ./nix/bin/nix hash path linux
+  wall_time          9.07s  ± 18.3ms    9.05s  … 9.09s           0 ( 0%)        💩+ 50.3% ±  1.9%
+  peak_rss           7.01MB ± 75.7KB    6.96MB … 7.09MB          0 ( 0%)        ⚡- 83.0% ±  0.4%
+  cpu_cycles         26.8G  ± 41.7M     26.7G  … 26.8G           0 ( 0%)        💩+ 50.0% ±  2.2%
+  instructions       97.7G  ± 95.6      97.7G  … 97.7G           0 ( 0%)        💩+ 66.4% ±  0.0%
+  cache_references   30.1M  ± 1.23M     28.7M  … 31.1M           0 ( 0%)        ⚡- 65.8% ± 10.2%
+  cache_misses       3.86M  ±  285K     3.68M  … 4.19M           0 ( 0%)        ⚡- 16.8% ±  9.9%
+  branch_misses      2.37M  ±  122K     2.26M  … 2.50M           0 ( 0%)        ⚡- 84.0% ± 57.8%
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ # I think the slowness is due to the Zig standard library's SHA256 implementation
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ narser pack linux > linux.nar
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ wc -c linux.nar 
+1837577096 linux.nar
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cmp <(nix nar ls linux.nar /) <(narser ls linux.nar /)
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cmp <(nix nar ls linux.nar / -R) <(narser ls linux.nar / -R)
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cmp <(nix nar ls linux.nar / -Rl) <(narser ls linux.nar / -Rl)
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cmp <(nix nar ls linux.nar / -l) <(narser ls linux.nar / -l)
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ poop "nix nar ls linux.nar / -lR" "narser ls linux.nar / -lR"
+Benchmark 1 (3 runs): nix nar ls linux.nar / -lR
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          6.33s  ± 18.4ms    6.31s  … 6.34s           0 ( 0%)        0%
-  peak_rss           40.0MB ± 84.0KB    39.9MB … 40.1MB          0 ( 0%)        0%
-  cpu_cycles         18.7G  ± 19.9M     18.7G  … 18.7G           0 ( 0%)        0%
-  instructions       60.9G  ± 72.5K     60.9G  … 60.9G           0 ( 0%)        0%
-  cache_references   89.3M  ± 2.94M     86.6M  … 92.4M           0 ( 0%)        0%
-  cache_misses       6.20M  ± 1.84M     5.01M  … 8.32M           0 ( 0%)        0%
-  branch_misses      12.8M  ±  608K     12.2M  … 13.4M           0 ( 0%)        0%
-Benchmark 2 (3 runs): ./safe/bin/narser hash linux
+  wall_time          2.96s  ± 19.0ms    2.94s  … 2.97s           0 ( 0%)        0%
+  peak_rss           3.75GB ± 41.0KB    3.75GB … 3.75GB          0 ( 0%)        0%
+  cpu_cycles         3.16G  ± 33.6M     3.14G  … 3.20G           0 ( 0%)        0%
+  instructions       2.60G  ±  528K     2.59G  … 2.60G           0 ( 0%)        0%
+  cache_references    140M  ± 1.27M      139M  …  141M           0 ( 0%)        0%
+  cache_misses       73.6M  ±  188K     73.4M  … 73.8M           0 ( 0%)        0%
+  branch_misses      4.87M  ±  669K     4.34M  … 5.62M           0 ( 0%)        0%
+Benchmark 2 (4 runs): narser ls linux.nar / -lR
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          9.17s  ± 34.8ms    9.13s  … 9.20s           0 ( 0%)        💩+ 44.9% ±  1.0%
-  peak_rss           6.92MB ± 75.7KB    6.83MB … 6.96MB          0 ( 0%)        ⚡- 82.7% ±  0.5%
-  cpu_cycles         26.9G  ± 59.8M     26.8G  … 26.9G           0 ( 0%)        💩+ 43.7% ±  0.5%
-  instructions       97.7G  ±  128      97.7G  … 97.7G           0 ( 0%)        💩+ 60.5% ±  0.0%
-  cache_references   34.9M  ±  800K     34.2M  … 35.8M           0 ( 0%)        ⚡- 60.9% ±  5.5%
-  cache_misses       4.71M  ± 69.1K     4.65M  … 4.78M           0 ( 0%)          - 24.0% ± 47.7%
-  branch_misses      3.23M  ±  356K     2.85M  … 3.55M           0 ( 0%)        ⚡- 74.8% ±  8.8%
-Benchmark 3 (3 runs): ./fast/bin/narser hash linux
+  wall_time          1.40s  ± 4.55ms    1.39s  … 1.40s           1 (25%)        ⚡- 52.8% ±  0.8%
+  peak_rss           1.85GB ±    0      1.85GB … 1.85GB          0 ( 0%)        ⚡- 50.8% ±  0.0%
+  cpu_cycles         1.07G  ± 1.25M     1.06G  … 1.07G           1 (25%)        ⚡- 66.3% ±  1.3%
+  instructions        825M  ± 92.1       825M  …  825M           0 ( 0%)        ⚡- 68.2% ±  0.0%
+  cache_references   75.0M  ± 16.3K     75.0M  … 75.0M           0 ( 0%)        ⚡- 46.4% ±  1.1%
+  cache_misses       43.3M  ± 25.8K     43.3M  … 43.3M           1 (25%)        ⚡- 41.1% ±  0.3%
+  branch_misses       483K  ±  498       483K  …  484K           0 ( 0%)        ⚡- 90.1% ± 17.1%
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ poop "nix nar cat linux.nar /README" "narser cat linux.nar /README"
+Benchmark 1 (3 runs): nix nar cat linux.nar /README
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          9.15s  ± 4.75ms    9.15s  … 9.16s           0 ( 0%)        💩+ 44.6% ±  0.5%
-  peak_rss           6.60MB ± 75.7KB    6.55MB … 6.68MB          0 ( 0%)        ⚡- 83.5% ±  0.5%
-  cpu_cycles         26.9G  ± 13.7M     26.9G  … 26.9G           0 ( 0%)        💩+ 43.8% ±  0.2%
-  instructions       98.2G  ± 38.1      98.2G  … 98.2G           0 ( 0%)        💩+ 61.3% ±  0.0%
-  cache_references   10.2M  ± 62.1K     10.1M  … 10.2M           0 ( 0%)        ⚡- 88.6% ±  5.3%
-  cache_misses       1.66M  ± 28.0K     1.64M  … 1.69M           0 ( 0%)        ⚡- 73.2% ± 47.7%
-  branch_misses      2.21M  ± 15.5K     2.19M  … 2.22M           0 ( 0%)        ⚡- 82.8% ±  7.6%
-Benchmark 4 (3 runs): ./small/bin/narser hash linux
+  wall_time          2.54s  ± 4.81ms    2.54s  … 2.55s           0 ( 0%)        0%
+  peak_rss           3.73GB ±  122KB    3.73GB … 3.73GB          0 ( 0%)        0%
+  cpu_cycles         2.44G  ± 3.82M     2.44G  … 2.45G           0 ( 0%)        0%
+  instructions       1.14G  ±  139K     1.13G  … 1.14G           0 ( 0%)        0%
+  cache_references    126M  ±  401K      126M  …  127M           0 ( 0%)        0%
+  cache_misses       69.8M  ± 66.8K     69.8M  … 69.9M           0 ( 0%)        0%
+  branch_misses      1.90M  ± 8.95K     1.89M  … 1.91M           0 ( 0%)        0%
+Benchmark 2 (4 runs): narser cat linux.nar /README
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          9.56s  ± 9.26ms    9.55s  … 9.57s           0 ( 0%)        💩+ 51.0% ±  0.5%
-  peak_rss           6.64MB ± 75.7KB    6.55MB … 6.68MB          0 ( 0%)        ⚡- 83.4% ±  0.5%
-  cpu_cycles         28.3G  ± 26.6M     28.3G  … 28.3G           0 ( 0%)        💩+ 51.5% ±  0.3%
-  instructions        102G  ±  148       102G  …  102G           0 ( 0%)        💩+ 67.6% ±  0.0%
-  cache_references   13.8M  ±  909K     13.1M  … 14.8M           0 ( 0%)        ⚡- 84.6% ±  5.5%
-  cache_misses       1.75M  ± 14.7K     1.73M  … 1.76M           0 ( 0%)        ⚡- 71.8% ± 47.7%
-  branch_misses      2.61M  ± 58.4K     2.55M  … 2.67M           0 ( 0%)        ⚡- 79.6% ±  7.7%
-[clevor@clevor-laptop-nixos:~/Code/zig/narser]$ git log | head -1
-commit 8cd0ba99de33cbf4b1091e26dcfe93097d2579d1
+  wall_time          1.34s  ± 10.4ms    1.33s  … 1.36s           0 ( 0%)        ⚡- 47.2% ±  0.7%
+  peak_rss           1.85GB ±    0      1.85GB … 1.85GB          0 ( 0%)        ⚡- 50.5% ±  0.0%
+  cpu_cycles          961M  ± 1.19M      959M  …  962M           1 (25%)        ⚡- 60.7% ±  0.2%
+  instructions        613M  ±  174       613M  …  613M           0 ( 0%)        ⚡- 46.0% ±  0.0%
+  cache_references   73.6M  ± 73.2K     73.5M  … 73.7M           0 ( 0%)        ⚡- 41.8% ±  0.4%
+  cache_misses       42.4M  ± 6.97K     42.4M  … 42.5M           0 ( 0%)        ⚡- 39.2% ±  0.1%
+  branch_misses       286K  ±  623       285K  …  287K           0 ( 0%)        ⚡- 85.0% ±  0.6%
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ narser unpack linux.nar out
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cmp <(nix nar pack out) linux.nar
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ rm -rf out ; time nix-store --restore out < linux.nar
+
+real	0m1.591s
+user	0m0.358s
+sys	0m1.227s
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ rm -rf out ; time nix-store --restore out < linux.nar
+
+real	0m1.609s
+user	0m0.356s
+sys	0m1.244s
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ rm -rf out ; time nix-store --restore out < linux.nar
+
+real	0m1.596s
+user	0m0.344s
+sys	0m1.246s
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ rm -rf out ; time narser unpack linux.nar out
+
+real	0m1.619s
+user	0m0.367s
+sys	0m1.240s
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ rm -rf out ; time narser unpack linux.nar out
+
+real	0m1.604s
+user	0m0.359s
+sys	0m1.239s
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ rm -rf out ; time narser unpack linux.nar out
+
+real	0m1.616s
+user	0m0.348s
+sys	0m1.261s
+[clevor@clevor-laptop-nixos:/tmp/clevor/test]$ cd linux/
+[clevor@clevor-laptop-nixos:/tmp/clevor/test/linux]$ git log
+commit c8bc81a52d5a2ac2e4b257ae123677cf94112755 (grafted, HEAD -> master, origin/master, origin/HEAD)
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Sat Aug 30 10:43:53 2025 -0700
+
+    Merge tag 'arm64-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux
+    
+    Pull arm64 fixes from Catalin Marinas:
+    
+     - CFI failure due to kpti_ng_pgd_alloc() signature mismatch
+    
+     - Underallocation bug in the SVE ptrace kselftest
+    
+    * tag 'arm64-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux:
+      kselftest/arm64: Don't open code SVE_PT_SIZE() in fp-ptrace
+      arm64: mm: Fix CFI failure due to kpti_ng_pgd_alloc function signature
