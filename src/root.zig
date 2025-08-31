@@ -222,17 +222,20 @@ pub const NarArchive = struct {
                     },
                     else => {
                         next.*.data = .{ .file = undefined };
-                        const stat = try cur.iterator.dir.statFile(e.name);
-                        const contents = try cur.iterator.dir.readFileAllocOptions(
-                            self.arena.allocator(),
-                            e.name,
-                            std.math.maxInt(usize),
-                            std.math.cast(usize, stat.size) orelse std.math.maxInt(usize),
-                            .of(u8),
-                            null,
-                        );
+
+                        var file = try cur.iterator.dir.openFile(e.name, .{});
+                        defer file.close();
+
+                        const stat = try file.stat();
+
+                        var buf: [4096]u8 = undefined;
+                        var fr = file.reader(&buf);
+
+                        var aw: std.Io.Writer.Allocating = .init(self.arena.allocator());
+                        while (try fr.interface.streamRemaining(&aw.writer) != 0) {}
+
                         next.data.file = .{
-                            .contents = contents,
+                            .contents = aw.toOwnedSlice() catch unreachable,
                             .is_executable = stat.mode & 1 == 1,
                         };
                     },
@@ -1193,12 +1196,12 @@ test "nar to directory to nar" {
     const expected = @embedFile("tests/dir-and-files.nar");
 
     var buffer: [2 * expected.len]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    var updated = stream.writer().adaptToNewApi(&.{});
 
-    try data.dump(&updated.new_interface);
+    var writer: std.Io.Writer = .fixed(&buffer);
 
-    try std.testing.expectEqualSlices(u8, expected, stream.getWritten());
+    try data.dump(&writer);
+
+    try std.testing.expectEqualSlices(u8, expected, writer.buffered());
 }
 
 test "more complex" {
