@@ -45,7 +45,7 @@ const help_message =
 
 const LsOptions = struct { long: bool, recursive: bool };
 
-pub fn ls(archive: *const narser.NarArchive, writer: *std.Io.Writer, opts: LsOptions) !void {
+pub fn ls(archive: *const narser.NixArchive, writer: *std.Io.Writer, opts: LsOptions) !void {
     var node = archive.root;
 
     if (opts.long) switch (node.data) {
@@ -272,12 +272,7 @@ pub fn main() !void {
         var in_buf: [4096]u8 = undefined;
         var in_reader = in_file.reader(&in_buf);
 
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-
-        while (try in_reader.interface.streamRemaining(&aw.writer) != 0) {}
-
-        var archive = try narser.NarArchive.fromSlice(allocator, aw.written());
+        var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{ .store_file_contents = false });
         defer archive.deinit();
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
@@ -300,12 +295,7 @@ pub fn main() !void {
         var in_buf: [4096]u8 = undefined;
         var in_reader = in_file.reader(&in_buf);
 
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-
-        while (try in_reader.interface.streamRemaining(&aw.writer) != 0) {}
-
-        var archive = try narser.NarArchive.fromSlice(allocator, aw.written());
+        var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{});
         defer archive.deinit();
 
         switch (archive.root.data) {

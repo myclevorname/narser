@@ -1,13 +1,6 @@
 const std = @import("std");
 const tests_path = @import("tests").tests_path;
 
-const assert = std.debug.assert;
-const expect = std.testing.expect;
-const expectEqual = std.testing.expectEqual;
-const expectEqualStrings = std.testing.expectEqualStrings;
-const mem = std.mem;
-const divCeil = std.math.divCeil;
-
 /// A Nix Archive file.
 ///
 /// Preconditions:
@@ -18,23 +11,37 @@ const divCeil = std.math.divCeil;
 /// has a parent set to said directory.
 ///
 /// 3. All objects in a directory must be sorted by name and must be unique within a directory.
-pub const NarArchive = struct {
+pub const NixArchive = struct {
     arena: std.heap.ArenaAllocator,
     pool: std.heap.MemoryPool(Object),
     root: *Object,
+    name_pool: std.heap.MemoryPool([std.fs.max_path_bytes]u8),
 
-    /// Takes ownership of a slice representing a Nix archive and deserializes it.
-    /// Guaranteed to not modify the slice if an error occurs.
-    pub fn fromSlice(allocator: std.mem.Allocator, slice: []u8) EncodeError!NarArchive {
-        var self: NarArchive = .{
+    pub const FromReaderOptions = struct { store_file_contents: bool = true };
+    pub const FromReaderError = std.mem.Allocator.Error || std.Io.Reader.Error || error{
+        NotANar,
+        InvalidToken,
+        InvalidPadding,
+        NameTooSmall,
+        NameTooLarge,
+        DuplicateObjectName,
+        WrongDirectoryOrder,
+    };
+
+    pub fn fromReader(
+        allocator: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        options: FromReaderOptions,
+    ) FromReaderError!NixArchive {
+        var self: NixArchive = .{
             .arena = .init(allocator),
             .pool = undefined,
             .root = undefined,
+            .name_pool = undefined,
         };
+        self.name_pool = .init(self.arena.allocator());
         self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
-
-        var stream = slice;
 
         var current = try self.pool.create();
         current.* = .{ .entry = null, .data = undefined };
@@ -56,42 +63,49 @@ pub const NarArchive = struct {
         };
         state: switch (State.start) {
             .start => {
-                expectToken(&stream, .magic) catch return error.NotANar;
+                expectToken(reader, .magic) catch |e| switch (e) {
+                    error.ReadFailed => return e,
+                    error.InvalidToken => return error.NotANar,
+                };
 
                 continue :state .get_object_type;
             },
             .get_object_type => {
-                if (matches(&stream, .file))
+                if (try takeToken(reader, .file))
                     continue :state .file
-                else if (matches(&stream, .directory))
+                else if (try takeToken(reader, .directory))
                     continue :state .directory
-                else if (matches(&stream, .symlink))
+                else if (try takeToken(reader, .symlink))
                     continue :state .symlink
                 else
-                    return error.InvalidFormat;
+                    return error.InvalidToken;
             },
             .get_entry => {
-                try expectToken(&stream, .directory_entry);
+                try expectToken(reader, .directory_entry);
                 continue :state .get_entry_inner;
             },
             .get_entry_inner => {
-                current.entry.?.name = try unstr(&stream);
+                const name = try unstr(reader);
+
+                const copied = try self.name_pool.create();
+                @memcpy(copied[0..name.len], name);
+                current.entry.?.name = copied[0..name.len];
+
                 if (current.entry.?.prev) |p| switch (std.mem.order(u8, p.entry.?.name, current.entry.?.name)) {
                     .lt => {},
                     .eq => return error.DuplicateObjectName,
                     .gt => return error.WrongDirectoryOrder,
                 };
-                try expectToken(&stream, .directory_entry_inner);
+                try expectToken(reader, .directory_entry_inner);
                 continue :state .get_object_type;
             },
             .directory => {
                 current.data = .{ .directory = null };
                 if (current.entry != null) {
-                    if (matches(&stream, .directory_entry_end)) continue :state .next_skip_end;
+                    if (try takeToken(reader, .directory_entry_end)) continue :state .next_skip_end;
                 } else {
-                    if (matches(&stream, .archive_end)) {
-                        if (stream.len != 0) return error.InvalidFormat else break :state;
-                    }
+                    if (try takeToken(reader, .archive_end))
+                        return self;
                 }
 
                 // there must be a child at this point
@@ -110,18 +124,41 @@ pub const NarArchive = struct {
             },
             .file => {
                 current.data = .{ .file = .{ .contents = undefined, .is_executable = false } };
-                if (matches(&stream, .executable_file)) current.data.file.is_executable = true;
-                try expectToken(&stream, .file_contents);
-                current.data.file.contents = try unstr(&stream);
+                if (try takeToken(reader, .executable_file)) current.data.file.is_executable = true;
+                try expectToken(reader, .file_contents);
+
+                const len = try reader.takeInt(u64, .little);
+                if (options.store_file_contents) {
+                    var aw: std.Io.Writer.Allocating = .init(self.arena.allocator());
+                    reader.streamExact64(&aw.writer, len) catch |e| switch (e) {
+                        inline error.EndOfStream, error.ReadFailed => |t| return t,
+                        error.WriteFailed => return error.OutOfMemory,
+                    };
+                    current.data.file.contents = aw.toOwnedSlice() catch unreachable;
+                } else {
+                    reader.discardAll64(len) catch |e| switch (e) {
+                        error.ReadFailed => return e,
+                        error.EndOfStream => return error.InvalidToken,
+                    };
+                    current.data.file.contents.len = len;
+                }
+                const pad = reader.take(padding(len)) catch |e| switch (e) {
+                    error.ReadFailed => return e,
+                    error.EndOfStream => return error.InvalidToken,
+                };
+                if (!std.mem.allEqual(u8, pad, 0)) return error.InvalidPadding;
                 continue :state .next;
             },
             .symlink => {
-                current.data = .{ .symlink = try unstr(&stream) };
+                const name = try unstr(reader);
+                const copied = try self.name_pool.create();
+                @memcpy(copied[0..name.len], name);
+                current.data = .{ .symlink = copied[0..name.len] };
                 continue :state .next;
             },
             .next => {
                 if (current.entry != null) {
-                    try expectToken(&stream, .directory_entry_end);
+                    try expectToken(reader, .directory_entry_end);
                     continue :state .leave_directory;
                 } else continue :state .end;
             },
@@ -129,10 +166,10 @@ pub const NarArchive = struct {
                 continue :state (if (current.entry != null) .leave_directory else .end);
             },
             .leave_directory => {
-                while (current.entry != null and matches(&stream, .directory_entry_end)) {
+                while (current.entry != null and try takeToken(reader, .directory_entry_end)) {
                     current = current.entry.?.parent;
                 } else {
-                    if (current.entry != null and matches(&stream, .directory_entry)) {
+                    if (current.entry != null and try takeToken(reader, .directory_entry)) {
                         const next = try self.pool.create();
                         current.entry.?.next = next;
                         next.* = .{
@@ -151,24 +188,23 @@ pub const NarArchive = struct {
                 }
             },
             .end => {
-                try expectToken(&stream, .archive_end);
-                if (stream.len != 0) return error.InvalidFormat;
-                break :state;
+                try expectToken(reader, .archive_end);
+                return self;
             },
         }
-
-        //std.debug.print("Success\n", .{});
-        return self;
+        comptime unreachable;
     }
 
     /// Converts the contents of a directory into a Nix archive. The directory passed must be
     /// opened with `.{ .iterate = true }`
-    pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NarArchive {
-        var self: NarArchive = .{
+    pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NixArchive {
+        var self: NixArchive = .{
             .arena = .init(allocator),
             .pool = undefined,
             .root = undefined,
+            .name_pool = undefined,
         };
+        self.name_pool = .init(self.arena.allocator());
         self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
@@ -255,7 +291,7 @@ pub const NarArchive = struct {
         allocator: std.mem.Allocator,
         contents: []const u8,
         is_executable: bool,
-    ) std.mem.Allocator.Error!NarArchive {
+    ) std.mem.Allocator.Error!NixArchive {
         var arena = std.heap.ArenaAllocator.init(allocator);
         var pool = std.heap.MemoryPool(Object).init(arena.allocator());
         errdefer arena.deinit();
@@ -273,6 +309,7 @@ pub const NarArchive = struct {
             .arena = arena,
             .pool = pool,
             .root = node,
+            .name_pool = .init(arena.allocator()),
         };
     }
 
@@ -280,7 +317,7 @@ pub const NarArchive = struct {
     pub fn fromSymlink(
         allocator: std.mem.Allocator,
         target: []const u8,
-    ) std.mem.Allocator.Error!NarArchive {
+    ) std.mem.Allocator.Error!NixArchive {
         var arena = std.heap.ArenaAllocator.init(allocator);
         var pool = std.heap.MemoryPool(Object).init(arena.allocator());
         errdefer arena.deinit();
@@ -298,11 +335,12 @@ pub const NarArchive = struct {
             .arena = arena,
             .pool = pool,
             .root = node,
+            .name_pool = .init(arena.allocator()),
         };
     }
 
-    /// Serialize a NarArchive into the writer.
-    pub fn dump(self: *const NarArchive, writer: *std.Io.Writer) !void {
+    /// Serialize a NixArchive into the writer.
+    pub fn dump(self: NixArchive, writer: *std.Io.Writer) !void {
         var node = self.root;
 
         try writeTokens(writer, &.{.magic});
@@ -343,7 +381,7 @@ pub const NarArchive = struct {
     }
 
     /// Unpacks a Nix archive into a directory.
-    pub fn unpackDir(self: *const NarArchive, target_dir: std.fs.Dir) !void {
+    pub fn unpackDir(self: NixArchive, target_dir: std.fs.Dir) !void {
         if (self.root.data.directory == null) return;
 
         var item_buf: [256]std.fs.Dir = undefined;
@@ -402,7 +440,7 @@ pub const NarArchive = struct {
         }
     }
 
-    pub fn deinit(self: *NarArchive) void {
+    pub fn deinit(self: *NixArchive) void {
         self.arena.deinit();
         self.* = undefined;
     }
@@ -611,20 +649,20 @@ pub fn unpackDirDirect(
 
     const State = enum { directory_entry, directory, file, symlink, end, leave_directory };
 
-    expectTokenReader(reader, .magic) catch |e| switch (e) {
-        error.InvalidFormat => return error.NotANar,
-        error.ReadFailed, error.EndOfStream => return e,
+    expectToken(reader, .magic) catch |e| switch (e) {
+        error.InvalidToken => return error.NotANar,
+        error.ReadFailed => return error.ReadFailed,
     };
 
-    expectTokenReader(reader, .directory) catch |e| switch (e) {
-        error.InvalidFormat => return error.WrongArchiveType,
-        error.ReadFailed, error.EndOfStream => return e,
+    expectToken(reader, .directory) catch |e| switch (e) {
+        error.InvalidToken => return error.WrongArchiveType,
+        error.ReadFailed => return error.ReadFailed,
     };
 
     state: switch (State.directory_entry) {
         .directory_entry => {
-            expectTokenReader(reader, .directory_entry) catch |e| switch (e) {
-                error.InvalidFormat => continue :state .leave_directory,
+            expectToken(reader, .directory_entry) catch |e| switch (e) {
+                error.InvalidToken => continue :state .leave_directory,
                 else => return e,
             };
 
@@ -656,11 +694,11 @@ pub fn unpackDirDirect(
             @memcpy(currents.items(.name_buf)[currents.len - 1][0..len], name);
 
             if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
-                return error.InvalidFormat;
+                return error.InvalidToken;
 
             currents.items(.last_name_len)[currents.len - 1] = len;
 
-            try expectTokenReader(reader, .directory_entry_inner);
+            try expectToken(reader, .directory_entry_inner);
 
             const file_string = getTokenString(.file);
             const directory_string = getTokenString(.directory);
@@ -672,15 +710,15 @@ pub fn unpackDirDirect(
             else if (std.mem.eql(u8, symlink_string, try reader.peek(symlink_string.len)))
                 continue :state .symlink
             else
-                return error.InvalidFormat;
+                return error.InvalidToken;
         },
         .file => {
-            expectTokenReader(reader, .file) catch unreachable;
+            expectToken(reader, .file) catch unreachable;
             const exec_token = comptime getTokenString(.executable_file);
             const is_executable = std.mem.eql(u8, try reader.peek(exec_token.len), exec_token);
             if (is_executable) reader.toss(exec_token.len);
 
-            try expectTokenReader(reader, .file_contents);
+            try expectToken(reader, .file_contents);
 
             const size = try reader.takeInt(u64, .little);
 
@@ -698,14 +736,14 @@ pub fn unpackDirDirect(
             try fw.interface.flush();
 
             if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-                return error.InvalidFormat;
+                return error.InvalidToken;
 
-            try expectTokenReader(reader, .directory_entry_end);
+            try expectToken(reader, .directory_entry_end);
 
             continue :state .directory_entry;
         },
         .symlink => {
-            expectTokenReader(reader, .symlink) catch unreachable;
+            expectToken(reader, .symlink) catch unreachable;
 
             const size = try reader.takeInt(u64, .little);
             switch (size) {
@@ -724,14 +762,14 @@ pub fn unpackDirDirect(
             };
 
             if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-                return error.InvalidFormat;
+                return error.InvalidToken;
 
-            try expectTokenReader(reader, .directory_entry_end);
+            try expectToken(reader, .directory_entry_end);
 
             continue :state .directory_entry;
         },
         .directory => {
-            expectTokenReader(reader, .directory) catch unreachable;
+            expectToken(reader, .directory) catch unreachable;
 
             const cur = currents.get(currents.len - 1);
 
@@ -750,38 +788,35 @@ pub fn unpackDirDirect(
             if (has_children) {
                 const child = try cur.dir.openDir(child_name, .{});
                 currents.appendAssumeCapacity(.{ .dir = child });
-            } else try expectTokenReader(reader, .directory_entry_end);
+            } else try expectToken(reader, .directory_entry_end);
             continue :state .directory_entry;
         },
         .leave_directory => {
             if (currents.len == 1)
                 continue :state .end
             else {
-                try expectTokenReader(reader, .directory_entry_end);
+                try expectToken(reader, .directory_entry_end);
                 var cur = currents.pop().?;
                 cur.dir.close();
                 continue :state .directory_entry;
             }
         },
         .end => {
-            try expectTokenReader(reader, .archive_end);
+            try expectToken(reader, .archive_end);
             return;
         },
     }
     comptime unreachable;
-
-    // TODO TODO TODO TODO TODO TODO
-    // TODO TODO TODO TODO TODO TODO
 }
 
 /// Returns whether the file is executable
 pub fn unpackFileDirect(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
-    expectTokenReader(reader, .magic) catch |e| switch (e) {
-        error.InvalidFormat => return error.NotANar,
-        error.ReadFailed, error.EndOfStream => return e,
+    expectToken(reader, .magic) catch |e| switch (e) {
+        error.InvalidToken => return error.NotANar,
+        error.ReadFailed => return e,
     };
 
-    try expectTokenReader(reader, .file);
+    try expectToken(reader, .file);
 
     const exec_token = getTokenString(.executable_file);
 
@@ -790,25 +825,25 @@ pub fn unpackFileDirect(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
         break :blk true;
     } else false;
 
-    try expectTokenReader(reader, .file_contents);
+    try expectToken(reader, .file_contents);
 
     const size = try reader.takeInt(u64, .little);
     try reader.streamExact64(writer, size);
 
     if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-        return error.InvalidFormat;
+        return error.InvalidToken;
 
-    try expectTokenReader(reader, .archive_end);
+    try expectToken(reader, .archive_end);
     return is_executable;
 }
 
 pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
-    expectTokenReader(reader, .magic) catch |e| switch (e) {
-        error.InvalidFormat => return error.NotANar,
-        error.ReadFailed, error.EndOfStream => return e,
+    expectToken(reader, .magic) catch |e| switch (e) {
+        error.InvalidToken => return error.NotANar,
+        error.ReadFailed => return e,
     };
 
-    try expectTokenReader(reader, .symlink);
+    try expectToken(reader, .symlink);
 
     const size = try reader.takeInt(u64, .little);
     switch (size) {
@@ -820,9 +855,9 @@ pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buf: *[std.fs.max_path_bytes]
     @memcpy(buf[0..size], try reader.take(size));
 
     if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-        return error.InvalidFormat;
+        return error.InvalidToken;
 
-    try expectTokenReader(reader, .archive_end);
+    try expectToken(reader, .archive_end);
     return buf[0..size];
 }
 
@@ -849,7 +884,7 @@ pub fn archiveType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
     ))
         return .symlink
     else
-        return error.InvalidFormat;
+        return error.InvalidToken;
 }
 
 pub const Object = struct {
@@ -876,12 +911,14 @@ pub const Object = struct {
 
     pub fn insertChild(self: *Object, child: *Object) error{DuplicateObjectName}!void {
         if (self.data.directory) |first|
-            switch (mem.order(u8, first.entry.?.name, child.entry.?.name)) {
+            switch (std.mem.order(u8, first.entry.?.name, child.entry.?.name)) {
                 .lt => {
                     var left = first;
-                    while (left.entry.?.next != null and mem.order(u8, left.entry.?.name, child.entry.?.name) == .lt) {
+                    while (left.entry.?.next != null and
+                        std.mem.order(u8, left.entry.?.name, child.entry.?.name) == .lt)
+                    {
                         left = left.entry.?.next.?;
-                    } else switch (mem.order(u8, left.entry.?.name, child.entry.?.name)) {
+                    } else switch (std.mem.order(u8, left.entry.?.name, child.entry.?.name)) {
                         .eq => return error.DuplicateObjectName,
                         .lt => {
                             left.entry.?.next = child;
@@ -952,13 +989,6 @@ pub const Object = struct {
     }
 };
 
-pub const EncodeError = std.mem.Allocator.Error || error{
-    InvalidFormat,
-    WrongDirectoryOrder,
-    DuplicateObjectName,
-    NotANar,
-};
-
 const Token = enum {
     magic,
     archive_end,
@@ -992,30 +1022,29 @@ fn getTokenString(comptime value: Token) []const u8 {
     return token_map.keys()[index];
 }
 
-fn matches(slice: *[]u8, comptime token: Token) bool {
-    return if (expectToken(slice, token)) |_| true else |_| false;
+fn takeToken(reader: *std.Io.Reader, comptime token: Token) error{ReadFailed}!bool {
+    return if (expectToken(reader, token)) |_| true else |e| switch (e) {
+        error.ReadFailed => error.ReadFailed,
+        error.InvalidToken => false,
+    };
 }
 
-fn expectToken(slice: *[]u8, comptime token: Token) !void {
-    //std.debug.print("Trying to match token {} ", .{token});
-    if (matchAndSlide(slice, getTokenString(token))) {
-        //std.debug.print("YES\n", .{});
-    } else {
-        //std.debug.print("NO\n", .{});
-        return error.InvalidFormat;
-    }
-}
-
-fn expectTokenReader(reader: *std.Io.Reader, comptime token: Token) !void {
+fn peekToken(reader: *std.Io.Reader, comptime token: Token) !bool {
     const taken = reader.peek(getTokenString(token).len) catch |e| switch (e) {
-        error.EndOfStream => return error.InvalidFormat,
-        else => return e,
+        error.EndOfStream => return false,
+        error.ReadFailed => return error.ReadFailed,
     };
 
-    if (!std.mem.eql(u8, getTokenString(token), taken))
-        return error.InvalidFormat;
+    return std.mem.eql(u8, getTokenString(token), taken);
+}
 
-    reader.toss(getTokenString(token).len);
+fn expectToken(reader: *std.Io.Reader, comptime token: Token) !void {
+    return if (peekToken(reader, token)) |r| switch (r) {
+        true => reader.toss(getTokenString(token).len),
+        false => error.InvalidToken,
+    } else |e| switch (e) {
+        error.ReadFailed => error.ReadFailed,
+    };
 }
 
 fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
@@ -1028,40 +1057,25 @@ fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
     try writer.writeAll(concatenated);
 }
 
-/// Compares the start of a slice and a comptime-known match, and advances the slice if it matches.
-fn matchAndSlide(slice: *[]u8, comptime match: []const u8) bool {
-    if (match.len % 8 != 0) @compileError("match is not a multiple of 8 and is of size " ++
-        std.fmt.digits2(@intCast(match.len)));
+fn unstr(reader: *std.Io.Reader) ![]u8 {
+    const len = try reader.takeInt(u64, .little);
 
-    if (slice.len < match.len) return false;
+    switch (len) {
+        0 => return error.NameTooSmall,
+        1...std.fs.max_path_bytes => {},
+        else => return error.NameTooLarge,
+    }
 
-    const matched = mem.eql(u8, slice.*[0..match.len], match);
-    if (matched) slice.* = slice.*[match.len..];
-    return matched;
-}
+    const read = try reader.take(std.mem.alignForward(u64, len, 8));
 
-fn unstr(slice: *[]u8) EncodeError![]u8 {
-    if (slice.len < 8) return error.InvalidFormat;
+    if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
 
-    const len = std.math.cast(usize, mem.readInt(u64, slice.*[0..8], .little)) orelse return error.OutOfMemory;
-    const padded_len = (divCeil(usize, len, 8) catch unreachable) * 8;
-
-    if (slice.*[8..].len < padded_len) return error.InvalidFormat;
-
-    slice.* = slice.*[8..];
-
-    const result = slice.*[0..len];
-
-    if (!mem.allEqual(u8, slice.*[len..padded_len], 0)) return error.InvalidFormat;
-
-    slice.* = slice.*[padded_len..];
-
-    return result;
+    return read[0..len];
 }
 
 fn writeStr(writer: *std.Io.Writer, string: []const u8) !void {
     var buffer: [8]u8 = undefined;
-    mem.writeInt(u64, &buffer, string.len, .little);
+    std.mem.writeInt(u64, &buffer, string.len, .little);
 
     const zeroes: [7]u8 = .{0} ** 7;
 
@@ -1079,68 +1093,80 @@ fn padding(size: u64) u3 {
 fn str(comptime string: anytype) []const u8 {
     comptime {
         var buffer: [8]u8 = undefined;
-        mem.writeInt(u64, &buffer, string.len, .little);
+        std.mem.writeInt(u64, &buffer, string.len, .little);
 
         const zeroes: [7]u8 = .{0} ** 7;
         return buffer ++ string ++ (if (string.len % 8 == 0) [0]u8{} else zeroes[0 .. (8 - string.len % 8) % 8]);
     }
 }
 
+test {
+    _ = std.testing.refAllDeclsRecursive(@This());
+}
+
 test "single file" {
     const allocator = std.testing.allocator;
 
-    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/README.nar")));
+    var reader: std.Io.Reader = .fixed(@constCast(@embedFile("tests/README.nar")));
+
+    var data = try NixArchive.fromReader(allocator, &reader, .{});
     defer data.deinit();
 
-    try expectEqualStrings(@embedFile("tests/README.out"), data.root.data.file.contents);
+    try std.testing.expectEqualStrings(@embedFile("tests/README.out"), data.root.data.file.contents);
 }
 
 test "directory containing a single file" {
     const allocator = std.testing.allocator;
 
-    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/hello.nar")));
+    var reader: std.Io.Reader = .fixed(@constCast(@embedFile("tests/hello.nar")));
+
+    var data = try NixArchive.fromReader(allocator, &reader, .{});
     defer data.deinit();
 
     const dir = data.root;
     const file = dir.data.directory.?;
-    try expectEqualStrings(@embedFile("tests/hello.zig.out"), file.data.file.contents);
-    try expectEqualStrings("main.zig", file.entry.?.name);
+    try std.testing.expectEqualStrings(@embedFile("tests/hello.zig.out"), file.data.file.contents);
+    try std.testing.expectEqualStrings("main.zig", file.entry.?.name);
 }
 
 test "a file, a directory, and some more files" {
     const allocator = std.testing.allocator;
 
-    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/dir-and-files.nar")));
+    var reader: std.Io.Reader = .fixed(@constCast(@embedFile("tests/dir-and-files.nar")));
+
+    var data = try NixArchive.fromReader(allocator, &reader, .{});
     defer data.deinit();
 
     const dir = data.root.data.directory.?;
-    try expectEqualStrings("dir", dir.entry.?.name);
+    try std.testing.expectEqualStrings("dir", dir.entry.?.name);
 
     const file1 = dir.entry.?.next.?;
-    try expectEqual(file1.entry.?.next, null);
-    try expectEqualStrings("file1", file1.entry.?.name);
-    try expectEqual(false, file1.data.file.is_executable);
-    try expectEqualStrings("hi\n", file1.data.file.contents);
+    try std.testing.expectEqual(file1.entry.?.next, null);
+    try std.testing.expectEqualStrings("file1", file1.entry.?.name);
+    try std.testing.expectEqual(false, file1.data.file.is_executable);
+    try std.testing.expectEqualStrings("hi\n", file1.data.file.contents);
 
     const file2 = dir.data.directory.?;
-    try expectEqualStrings("file2", file2.entry.?.name);
-    try expectEqual(true, file2.data.file.is_executable);
-    try expectEqualStrings("bye\n", file2.data.file.contents);
+    try std.testing.expectEqualStrings("file2", file2.entry.?.name);
+    try std.testing.expectEqual(true, file2.data.file.is_executable);
+    try std.testing.expectEqualStrings("bye\n", file2.data.file.contents);
 
     const file3 = file2.entry.?.next.?;
-    try expectEqual(false, file3.data.file.is_executable);
-    try expectEqualStrings("file3", file3.entry.?.name);
-    try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.entry.?.next);
+    try std.testing.expectEqual(false, file3.data.file.is_executable);
+    try std.testing.expectEqualStrings("file3", file3.entry.?.name);
+    try std.testing.expectEqualStrings("nevermind\n", file3.data.file.contents);
+    try std.testing.expectEqual(null, file3.entry.?.next);
 }
 
 test "a symlink" {
     const allocator = std.testing.allocator;
 
-    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/symlink.nar")));
+    var reader: std.Io.Reader = .fixed(@constCast(@embedFile("tests/symlink.nar")));
+
+    var data = try NixArchive.fromReader(allocator, &reader, .{});
     defer data.deinit();
 
-    try expectEqualStrings("README.out", data.root.data.symlink);
+    try std.testing.expectEqualStrings("README.out", data.root.data.symlink);
 }
 
 test "nar from dir-and-files" {
@@ -1149,28 +1175,28 @@ test "nar from dir-and-files" {
     var root = try std.fs.cwd().openDir(tests_path ++ "/dir-and-files", .{ .iterate = true });
     defer root.close();
 
-    var data = try NarArchive.fromDirectory(allocator, root);
+    var data = try NixArchive.fromDirectory(allocator, root);
     defer data.deinit();
 
     const dir = data.root.data.directory.?;
-    try expectEqualStrings("dir", dir.entry.?.name);
+    try std.testing.expectEqualStrings("dir", dir.entry.?.name);
 
     const file1 = dir.entry.?.next.?;
-    try expectEqual(null, file1.entry.?.next);
-    try expectEqualStrings("file1", file1.entry.?.name);
-    try expectEqual(false, file1.data.file.is_executable);
-    try expectEqualStrings("hi\n", file1.data.file.contents);
+    try std.testing.expectEqual(null, file1.entry.?.next);
+    try std.testing.expectEqualStrings("file1", file1.entry.?.name);
+    try std.testing.expectEqual(false, file1.data.file.is_executable);
+    try std.testing.expectEqualStrings("hi\n", file1.data.file.contents);
 
     const file2 = dir.data.directory.?;
-    try expectEqualStrings("file2", file2.entry.?.name);
-    try expectEqual(true, file2.data.file.is_executable);
-    try expectEqualStrings("bye\n", file2.data.file.contents);
+    try std.testing.expectEqualStrings("file2", file2.entry.?.name);
+    try std.testing.expectEqual(true, file2.data.file.is_executable);
+    try std.testing.expectEqualStrings("bye\n", file2.data.file.contents);
 
     const file3 = file2.entry.?.next.?;
-    try expectEqual(false, file3.data.file.is_executable);
-    try expectEqualStrings("file3", file3.entry.?.name);
-    try expectEqualStrings("nevermind\n", file3.data.file.contents);
-    try expectEqual(null, file3.entry.?.next);
+    try std.testing.expectEqual(false, file3.data.file.is_executable);
+    try std.testing.expectEqualStrings("file3", file3.entry.?.name);
+    try std.testing.expectEqualStrings("nevermind\n", file3.data.file.contents);
+    try std.testing.expectEqual(null, file3.entry.?.next);
 }
 
 test "empty directory" {
@@ -1181,16 +1207,18 @@ test "empty directory" {
     var root = try std.fs.cwd().openDir(tests_path ++ "/empty", .{ .iterate = true });
     defer root.close();
 
-    var data = try NarArchive.fromDirectory(allocator, root);
+    var data = try NixArchive.fromDirectory(allocator, root);
     defer data.deinit();
 
-    try expectEqual(null, data.root.data.directory);
+    try std.testing.expectEqual(null, data.root.data.directory);
 }
 
 test "nar to directory to nar" {
     const allocator = std.testing.allocator;
 
-    var data = try NarArchive.fromSlice(allocator, @constCast(@embedFile("tests/dir-and-files.nar")));
+    var reader: std.Io.Reader = .fixed(@constCast(@embedFile("tests/dir-and-files.nar")));
+
+    var data = try NixArchive.fromReader(allocator, &reader, .{});
     defer data.deinit();
 
     const expected = @embedFile("tests/dir-and-files.nar");
@@ -1222,14 +1250,16 @@ test "more complex" {
     {
         try dumpDirectory(allocator, root, writer);
 
-        var archive = try NarArchive.fromDirectory(allocator, root);
+        var archive = try NixArchive.fromDirectory(allocator, root);
         defer archive.deinit();
 
         try archive.dump(writer);
 
         const contents: []u8 = @constCast(@embedFile("tests/complex.nar"));
 
-        var other_archive = try NarArchive.fromSlice(allocator, contents);
+        var reader: std.Io.Reader = .fixed(contents);
+
+        var other_archive = try NixArchive.fromReader(allocator, &reader, .{});
         defer other_archive.deinit();
 
         try other_archive.dump(writer);
@@ -1240,7 +1270,7 @@ test "more complex" {
 
         try dumpDirectory(allocator, empty, writer);
 
-        var archive = try NarArchive.fromDirectory(allocator, empty);
+        var archive = try NixArchive.fromDirectory(allocator, empty);
         defer archive.deinit();
 
         try archive.dump(writer);

@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const use_llvm = b.option(bool, "use-llvm", "Use the LLVM backend");
+    const no_bin = b.option(bool, "no-bin", "Don't generate a binary (useful with -fincremental)") orelse false;
     const strip = b.option(bool, "strip", "Remove debugging symbols");
 
     if (target.result.os.tag == .windows or target.result.os.tag == .wasi)
@@ -33,7 +34,10 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installFile("src/_narser.bash", "share/bash-completion/completions/narser");
-    b.installArtifact(exe);
+    if (no_bin)
+        b.getInstallStep().dependOn(&exe.step)
+    else
+        b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
 
