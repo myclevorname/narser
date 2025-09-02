@@ -5,7 +5,6 @@ Currently, `narser pack` is around twice as fast as Nix at packing the Linux ker
 However, the `hash` subcommand is somewhat slower than `nix hash path`.
 
 NOTE: Not to be confused with the [Narser](https://github.com/Nacorpio/Narser) parser generator, which is 9 years old.
-See also [narz](https://github.com/water-sucks/narz), another Zig-based alternative.
 
 WARNING: DO NOT run on a filesystem with case-insensitive file names as that allows an attacker to write to arbitrary files with the same permissions as the invoking user.
 Narser does not and will not support Nix's case-hacking on MacOS.
