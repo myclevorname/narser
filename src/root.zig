@@ -552,7 +552,7 @@ pub fn dumpDirectory(
                             var aw: std.Io.Writer.Allocating = .init(allocator);
                             defer aw.deinit();
 
-                        try aw.ensureUnusedCapacity(fr.interface.buffer.len);
+                            try aw.ensureUnusedCapacity(fr.interface.buffer.len);
 
                             while (try aw.writer.sendFileAll(&fr, .unlimited) != 0) {}
                             const size = aw.writer.buffered().len;
