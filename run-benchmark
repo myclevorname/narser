@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+set -v
+
+echo $1
+
+mkdir $1 || exit 1
+cd $1
+
+nix build git+https://git.lix.systems/lix-project/lix?rev=f4bdddf0fdaabc68546cf561c5343b83d95d2466 -o lix
+nix build github:NixOS/nix/1935c19705159f3a97e6f0ea98487ecc55b4a0b9 -o nix
+nix build github:water-sucks/narz/760736b98e08c7c741838f5ad020d6d2e33b5e57 -o narz
+nix build github:myclevorname/narser/016256f814384028362973c210433816c508e413 -o narser
+
+git clone https://github.com/torvalds/linux --depth=1 -q
+cd linux
+git log | head
+cd ..
+
+nix nar pack linux > linux.nar
+
+cmp <(./nix/bin/nix nar pack linux) <(./lix/bin/nix nar dump-path linux)
+cmp <(./nix/bin/nix nar pack linux) <(./narser/bin/narser pack linux)
+
+cmp <(./nix/bin/nix nar cat linux.nar /README) <(./lix/bin/nix nar cat linux.nar /README)
+cmp <(./nix/bin/nix nar cat linux.nar /README) <(./narser/bin/narser cat linux.nar /README)
+cmp <(./nix/bin/nix nar cat linux.nar /README) <(./narz/bin/narz cat linux.nar /README)
+
+cmp <(./nix/bin/nix nar ls linux.nar /) <(./lix/bin/nix nar ls linux.nar /)
+cmp <(./nix/bin/nix nar ls linux.nar /) <(./narser/bin/narser ls linux.nar /)
+cmp <(./nix/bin/nix nar ls linux.nar /) <(./narz/bin/narz ls linux.nar / 2> /dev/null)
+
+cmp <(./nix/bin/nix nar ls linux.nar / -l) <(./lix/bin/nix nar ls linux.nar / -l)
+cmp <(./nix/bin/nix nar ls linux.nar / -l) <(./narser/bin/narser ls linux.nar / -l)
+cmp <(./nix/bin/nix nar ls linux.nar / -l) <(./narz/bin/narz ls linux.nar / -l 2> /dev/null)
+
+cmp <(./nix/bin/nix nar ls linux.nar / -lR) <(./lix/bin/nix nar ls linux.nar / -lR)
+cmp <(./nix/bin/nix nar ls linux.nar / -lR) <(./narser/bin/narser ls linux.nar / -lR)
+cmp <(./nix/bin/nix nar ls linux.nar / -lR) <(./narz/bin/narz ls linux.nar / -lr 2> /dev/null)
+
+cmp <(./nix/bin/nix nar ls linux.nar / -R) <(./lix/bin/nix nar ls linux.nar / -R)
+cmp <(./nix/bin/nix nar ls linux.nar / -R) <(./narser/bin/narser ls linux.nar / -R)
+cmp <(./nix/bin/nix nar ls linux.nar / -R) <(./narz/bin/narz ls linux.nar / -r 2> /dev/null)
+
+poop "./nix/bin/nix nar pack linux" "./lix/bin/nix nar dump-path linux" "./narser/bin/narser pack linux"
+poop "./nix/bin/nix nar ls linux.nar /" "./lix/bin/nix nar ls linux.nar /" "./narser/bin/narser ls linux.nar /" "./narz/bin/narz ls linux.nar /"
+poop "./nix/bin/nix nar ls linux.nar / -R" "./lix/bin/nix nar ls linux.nar / -R" "./narser/bin/narser ls linux.nar / -R" "./narz/bin/narz ls linux.nar / -r"
+poop "./nix/bin/nix nar ls linux.nar / -Rl" "./lix/bin/nix nar ls linux.nar / -Rl" "./narser/bin/narser ls linux.nar / -Rl" "./narz/bin/narz ls linux.nar / -rl"
+poop "./nix/bin/nix nar ls linux.nar / -l" "./lix/bin/nix nar ls linux.nar / -l" "./narser/bin/narser ls linux.nar / -l" "./narz/bin/narz ls linux.nar / -l"
+poop "./nix/bin/nix nar cat linux.nar /README" "./lix/bin/nix nar cat linux.nar /README" "./narser/bin/narser cat linux.nar /README" "./narz/bin/narz cat linux.nar /README"
+
+./nix/bin/nix-store --restore out < linux.nar
+cmp <(./nix/bin/nix nar pack out) linux.nar
+rm -rf out
+
+./lix/bin/nix-store --restore out < linux.nar
+cmp <(./nix/bin/nix nar pack out) linux.nar
+rm -rf out
+
+./narser/bin/narser unpack linux.nar out
+cmp <(./nix/bin/nix nar pack out) linux.nar
+rm -rf out
+
+rm -rf out ; time ./nix/bin/nix-store --restore out < linux.nar
+rm -rf out ; time ./nix/bin/nix-store --restore out < linux.nar
+rm -rf out ; time ./nix/bin/nix-store --restore out < linux.nar
+
+rm -rf out ; time ./lix/bin/nix-store --restore out < linux.nar
+rm -rf out ; time ./lix/bin/nix-store --restore out < linux.nar
+rm -rf out ; time ./lix/bin/nix-store --restore out < linux.nar
+
+rm -rf out ; time ./narser/bin/narser unpack linux.nar out
+rm -rf out ; time ./narser/bin/narser unpack linux.nar out
+rm -rf out ; time ./narser/bin/narser unpack linux.nar out
