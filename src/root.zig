@@ -535,7 +535,7 @@ pub fn dumpDirectory(
                             try writeTokens(writer, &.{.executable_file});
                         try writeTokens(writer, &.{.file_contents});
 
-                        var buf: [4096]u8 = undefined;
+                        var buf: [2048]u8 = undefined;
                         var fr = file.reader(&buf);
 
                         if (fr.getSize()) |size| {
@@ -734,7 +734,7 @@ pub fn unpackDirDirect(
             );
             defer file.close();
 
-            var fw_buf: [4096 * 8]u8 = undefined;
+            var fw_buf: [4096 * 4]u8 = undefined;
             var fw = file.writer(&fw_buf);
             try reader.streamExact64(&fw.interface, size);
             try fw.interface.flush();

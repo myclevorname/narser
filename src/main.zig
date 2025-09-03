@@ -178,7 +178,7 @@ const OptsIter = struct {
 
 pub fn main() !void {
     const stdout = std.fs.File.stdout();
-    var stdout_buffer: [4096 * 32]u8 = undefined;
+    var stdout_buffer: [4096 * 64]u8 = undefined;
     var fw = stdout.writer(&stdout_buffer);
     var writer = &fw.interface;
 
@@ -334,7 +334,7 @@ pub fn main() !void {
 
         var file = try std.fs.cwd().openFile(archive_path, .{});
         defer file.close();
-        var fbuf: [4096 * 8]u8 = undefined;
+        var fbuf: [4096 * 128]u8 = undefined;
         var fr = file.reader(&fbuf);
         const reader = &fr.interface;
 
