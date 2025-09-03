@@ -12,7 +12,8 @@ const help_message =
     \\    -h, -?  Display this help message
     \\    -l, -L  Long listing (ls)
     \\    -r, -R  Recurse (ls)
-    \\    -x      Standard input is executable (pack, hash)
+    \\    -n      file is not executable (pack, hash)
+    \\    -x      file is executable (pack, hash)
     \\
     \\Commands:
     \\    unpack <ARCHIVE> <PATH>
@@ -198,7 +199,7 @@ pub fn main() !void {
         show_help: bool = false,
         long_listing: bool = false,
         recurse: bool = false,
-        executable: bool = false,
+        executable: ?bool = null,
     };
     var opts: Options = .{};
 
@@ -207,6 +208,7 @@ pub fn main() !void {
             'h', '?' => opts.show_help = true,
             'l', 'L' => opts.long_listing = true,
             'r', 'R' => opts.recurse = true,
+            'n' => opts.executable = false,
             'x' => opts.executable = true,
             else => fatal("Invalid option '{c}'\n{s}", .{ opt, help_message }),
         },
@@ -229,7 +231,12 @@ pub fn main() !void {
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) {
-            try narser.dumpFile(allocator, std.fs.File.stdin(), opts.executable, used_writer);
+            try narser.dumpFile(
+                allocator,
+                std.fs.File.stdin(),
+                opts.executable orelse false,
+                used_writer,
+            );
         } else {
             var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
@@ -247,7 +254,12 @@ pub fn main() !void {
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
-                        try narser.dumpFile(allocator, file, null, used_writer);
+                        try narser.dumpFile(
+                            allocator,
+                            file,
+                            opts.executable orelse null,
+                            used_writer,
+                        );
                     },
                 }
             }

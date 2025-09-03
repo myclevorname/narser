@@ -536,13 +536,13 @@ pub fn dumpDirectory(
                         try writeTokens(writer, &.{.file_contents});
 
                         var buf: [4096]u8 = undefined;
-                        var fw = file.reader(&buf);
+                        var fr = file.reader(&buf);
 
-                        if (fw.getSize()) |size| {
+                        if (fr.getSize()) |size| {
                             try writer.writeInt(u64, size, .little);
                             var left = size;
                             while (left != 0) {
-                                const read = try writer.sendFileAll(&fw, .limited64(size));
+                                const read = try writer.sendFileAll(&fr, .limited64(size));
                                 left -= read;
                                 if (read == 0 and left != 0) return error.EndOfStream;
                             }
@@ -552,7 +552,9 @@ pub fn dumpDirectory(
                             var aw: std.Io.Writer.Allocating = .init(allocator);
                             defer aw.deinit();
 
-                            while (try aw.writer.sendFileAll(&fw, .unlimited) != 0) {}
+                        try aw.ensureUnusedCapacity(fr.interface.buffer.len);
+
+                            while (try aw.writer.sendFileAll(&fr, .unlimited) != 0) {}
                             const size = aw.writer.buffered().len;
                             try writer.writeInt(u64, size, .little);
                             try writer.writeAll(aw.writer.buffered());
@@ -610,6 +612,8 @@ pub fn dumpFile(allocator: std.mem.Allocator, file: std.fs.File, executable: ?bo
         } else |_| {
             var aw = std.Io.Writer.Allocating.init(allocator);
             defer aw.deinit();
+
+            try aw.ensureUnusedCapacity(fr.interface.buffer.len);
 
             const s = try aw.writer.sendFileAll(&fr, .unlimited);
             try writer.writeInt(u64, s, .little);
