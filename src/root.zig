@@ -264,8 +264,7 @@ pub const NixArchive = struct {
 
                         const stat = try file.stat();
 
-                        var buf: [4096]u8 = undefined;
-                        var fr = file.reader(&buf);
+                        var fr = file.reader(&.{});
 
                         var aw: std.Io.Writer.Allocating = .init(self.arena.allocator());
                         while (try fr.interface.streamRemaining(&aw.writer) != 0) {}
@@ -535,8 +534,7 @@ pub fn dumpDirectory(
                             try writeTokens(writer, &.{.executable_file});
                         try writeTokens(writer, &.{.file_contents});
 
-                        var buf: [2048]u8 = undefined;
-                        var fr = file.reader(&buf);
+                        var fr = file.reader(&.{});
 
                         if (fr.getSize()) |size| {
                             try writer.writeInt(u64, size, .little);
@@ -637,6 +635,7 @@ pub fn unpackDirDirect(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     out_dir: std.fs.Dir,
+    file_out_buffer: []u8,
 ) !void {
     std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
 
@@ -734,8 +733,7 @@ pub fn unpackDirDirect(
             );
             defer file.close();
 
-            var fw_buf: [4096 * 4]u8 = undefined;
-            var fw = file.writer(&fw_buf);
+            var fw = file.writer(file_out_buffer);
             try reader.streamExact64(&fw.interface, size);
             try fw.interface.flush();
 

@@ -349,7 +349,8 @@ pub fn main() !void {
             .directory => {
                 var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
                 defer dir.close();
-                try narser.unpackDirDirect(allocator, reader, dir);
+                var fw_buf: [4096 * 4]u8 = undefined;
+                try narser.unpackDirDirect(allocator, reader, dir, &fw_buf);
             },
             .file => if (target_path == null or std.mem.eql(u8, "-", target_path.?)) {
                 _ = try narser.unpackFileDirect(reader, writer);
