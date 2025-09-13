@@ -950,10 +950,16 @@ pub const Object = struct {
         var cur = self;
         var parts_buf: [4096][]const u8 = undefined;
         var parts: std.ArrayListUnmanaged([]const u8) = .initBuffer(&parts_buf);
+        if (self.entry != null and self.data == .symlink)
+            parts.appendAssumeCapacity(self.data.symlink);
+
         parts.appendAssumeCapacity(subpath);
+
+        var limit: u16 = 0;
 
         comptime std.debug.assert(std.fs.path.sep == '/');
         while (parts.pop()) |full_first_path| {
+            limit = std.math.add(u16, limit, 1) catch return error.NestedTooDeep;
             const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
             const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
             const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
@@ -968,7 +974,7 @@ pub const Object = struct {
             cur = if (cur.data == .directory)
                 cur.data.directory orelse return error.FileNotFound
             else
-                @panic(cur.entry.?.name);
+                return error.NotDir;
             find: while (true) {
                 switch (std.mem.order(u8, cur.entry.?.name, first)) {
                     .lt => {},
@@ -979,7 +985,7 @@ pub const Object = struct {
             }
             switch (cur.data) {
                 .directory => {},
-                .file => if (parts.items.len != 0) return error.IsFile,
+                .file => if (parts.items.len != 0) return error.NotDir,
                 .symlink => |target| {
                     if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
                     parts.appendBounded(target) catch return error.NestedTooDeep;
