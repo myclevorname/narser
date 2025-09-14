@@ -951,7 +951,10 @@ pub const Object = struct {
         var parts_buf: [4096][]const u8 = undefined;
         var parts: std.ArrayListUnmanaged([]const u8) = .initBuffer(&parts_buf);
         if (self.entry != null and self.data == .symlink)
-            parts.appendAssumeCapacity(self.data.symlink);
+            if (self.data.symlink[0] == '/')
+                return error.PathOutsideArchive
+            else
+                parts.appendAssumeCapacity(self.data.symlink);
 
         parts.appendAssumeCapacity(subpath);
 
@@ -963,7 +966,14 @@ pub const Object = struct {
             const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
             const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
             const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
-            if (rest.len != 0) parts.appendAssumeCapacity(rest);
+            if (first_part_len != null) parts.appendAssumeCapacity(rest);
+
+            std.debug.print("{s} {}\n", .{ full_first_path, parts.items.len });
+            if (cur.data == .symlink and cur.entry != null) {
+                parts.appendBounded(cur.data.symlink) catch return error.NestedTooDeep;
+                cur = if (cur.entry) |e| e.parent else cur;
+                continue;
+            }
 
             if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
             if (std.mem.eql(u8, first, "..")) {
@@ -988,8 +998,6 @@ pub const Object = struct {
                 .file => if (parts.items.len != 0) return error.NotDir,
                 .symlink => |target| {
                     if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
-                    parts.appendBounded(target) catch return error.NestedTooDeep;
-                    cur = cur.entry.?.parent;
                 },
             }
         }

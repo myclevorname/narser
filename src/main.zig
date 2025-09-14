@@ -289,7 +289,7 @@ pub fn main() !void {
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
         archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.NotDir => fatal("In archive: expected directory, found file", .{}),
+            error.NotDir => fatal("In archive: expected directory", .{}),
             error.FileNotFound => fatal("In archive: file not found", .{}),
             error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
             error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
@@ -317,7 +317,7 @@ pub fn main() !void {
         }
 
         const sub = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.NotDir => fatal("In archive: expected directory, found file", .{}),
+            error.NotDir => fatal("In archive: expected directory", .{}),
             error.FileNotFound => fatal("In archive: file not found", .{}),
             error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
             error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
