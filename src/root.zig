@@ -968,7 +968,7 @@ pub const Object = struct {
             const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
             if (first_part_len != null) parts.appendAssumeCapacity(rest);
 
-            std.debug.print("{s} {}\n", .{ full_first_path, parts.items.len });
+            //std.debug.print("{s} {}\n", .{ full_first_path, parts.items.len });
             if (cur.data == .symlink and cur.entry != null) {
                 parts.appendBounded(cur.data.symlink) catch return error.NestedTooDeep;
                 cur = if (cur.entry) |e| e.parent else cur;
