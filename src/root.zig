@@ -1,6 +1,8 @@
 const std = @import("std");
 const tests_path = @import("tests").tests_path;
 
+const NameLen = std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, std.fs.max_path_bytes + 8));
+
 /// A Nix Archive file.
 ///
 /// Preconditions:
@@ -26,6 +28,7 @@ pub const NixArchive = struct {
         NameTooLarge,
         DuplicateObjectName,
         WrongDirectoryOrder,
+        FileTooLarge,
     };
 
     pub fn fromReader(
@@ -127,7 +130,8 @@ pub const NixArchive = struct {
                 if (try takeToken(reader, .executable_file)) current.data.file.is_executable = true;
                 try expectToken(reader, .file_contents);
 
-                const len = try reader.takeInt(u64, .little);
+                const len = std.math.cast(usize, try reader.takeInt(u64, .little)) orelse
+                    return error.FileTooLarge; // e.g. len of 8 GB on a 32-bit system
                 if (options.store_file_contents) {
                     var aw: std.Io.Writer.Allocating = .init(self.arena.allocator());
                     reader.streamExact64(&aw.writer, len) catch |e| switch (e) {
@@ -641,7 +645,7 @@ pub fn unpackDirDirect(
 
     var currents: std.MultiArrayList(struct {
         name_buf: [std.fs.max_path_bytes]u8 = undefined,
-        last_name_len: ?u64 = null,
+        last_name_len: ?NameLen = null,
         dir: std.fs.Dir,
     }) = .empty;
     defer currents.deinit(allocator);
@@ -669,7 +673,8 @@ pub fn unpackDirDirect(
                 else => return e,
             };
 
-            const len = try reader.takeInt(u64, .little);
+            const len = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+                return error.NameTooLarge;
             switch (len) {
                 0 => return error.NameTooSmall,
                 1...std.fs.max_path_bytes => {},
@@ -747,7 +752,8 @@ pub fn unpackDirDirect(
         .symlink => {
             expectToken(reader, .symlink) catch unreachable;
 
-            const size = try reader.takeInt(u64, .little);
+            const size = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+                return error.NameTooLarge;
             switch (size) {
                 0 => return error.NameTooSmall,
                 1...std.fs.max_path_bytes => {},
@@ -847,7 +853,8 @@ pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buf: *[std.fs.max_path_bytes]
 
     try expectToken(reader, .symlink);
 
-    const size = try reader.takeInt(u64, .little);
+    const size = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+        return error.NameTooLarge;
     switch (size) {
         0 => return error.NameTooSmall,
         1...std.fs.max_path_bytes => {},
@@ -982,7 +989,8 @@ pub const Object = struct {
             }
 
             cur = if (cur.data == .directory)
-                cur.data.directory orelse return error.FileNotFound
+                cur.data.directory orelse
+                return error.FileNotFound
             else
                 return error.NotDir;
             find: while (true) {
@@ -991,7 +999,8 @@ pub const Object = struct {
                     .eq => break :find,
                     .gt => return error.FileNotFound,
                 }
-                cur = cur.entry.?.next orelse return error.FileNotFound;
+                cur = cur.entry.?.next orelse
+                    return error.FileNotFound;
             }
             switch (cur.data) {
                 .directory => {},
@@ -1074,7 +1083,8 @@ fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
 }
 
 fn unstr(reader: *std.Io.Reader) ![]u8 {
-    const len = try reader.takeInt(u64, .little);
+    const len = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+        return error.NameTooLarge;
 
     switch (len) {
         0 => return error.NameTooSmall,
@@ -1082,7 +1092,7 @@ fn unstr(reader: *std.Io.Reader) ![]u8 {
         else => return error.NameTooLarge,
     }
 
-    const read = try reader.take(std.mem.alignForward(u64, len, 8));
+    const read = try reader.take(std.mem.alignForward(NameLen, len, 8));
 
     if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
 
