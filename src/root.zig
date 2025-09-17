@@ -990,7 +990,7 @@ pub const Object = struct {
 
             cur = if (cur.data == .directory)
                 cur.data.directory orelse
-                return error.FileNotFound
+                    return error.FileNotFound
             else
                 return error.NotDir;
             find: while (true) {
