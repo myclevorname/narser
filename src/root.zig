@@ -1,7 +1,9 @@
 const std = @import("std");
 const tests_path = @import("tests").tests_path;
 
-const NameLen = std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, std.fs.max_path_bytes + 8));
+const Name = std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, std.fs.max_name_bytes + 2));
+
+const Target = std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, std.fs.max_path_bytes + 2));
 
 /// A Nix Archive file.
 ///
@@ -17,7 +19,7 @@ pub const NixArchive = struct {
     arena: std.heap.ArenaAllocator,
     pool: std.heap.MemoryPool(Object),
     root: *Object,
-    name_pool: std.heap.MemoryPool([std.fs.max_path_bytes]u8),
+    name_pool: std.heap.MemoryPool([std.fs.max_name_bytes]u8),
 
     pub const FromReaderOptions = struct { store_file_contents: bool = true };
     pub const FromReaderError = std.mem.Allocator.Error || std.Io.Reader.Error || error{
@@ -89,6 +91,7 @@ pub const NixArchive = struct {
             },
             .get_entry_inner => {
                 const name = try unstr(reader);
+                if (name.len > std.fs.max_path_bytes) return error.NameTooLarge;
 
                 const copied = try self.name_pool.create();
                 @memcpy(copied[0..name.len], name);
@@ -460,7 +463,7 @@ pub fn dumpDirectory(
     // in reverse. Reading the next node is as easy as popping. `dir_indicies` is to keep track
     // of where the contents of each directory end.
 
-    var node_names: std.heap.MemoryPool([std.fs.max_path_bytes]u8) = .init(allocator);
+    var node_names: std.heap.MemoryPoolAligned([std.fs.max_name_bytes]u8, .@"64") = .init(allocator);
     defer node_names.deinit();
 
     var nodes: std.MultiArrayList(struct {
@@ -644,8 +647,8 @@ pub fn unpackDirDirect(
     std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
 
     var currents: std.MultiArrayList(struct {
-        name_buf: [std.fs.max_path_bytes]u8 = undefined,
-        last_name_len: ?NameLen = null,
+        name_buf: [std.fs.max_name_bytes]u8 = undefined,
+        last_name_len: ?Name = null,
         dir: std.fs.Dir,
     }) = .empty;
     defer currents.deinit(allocator);
@@ -673,11 +676,11 @@ pub fn unpackDirDirect(
                 else => return e,
             };
 
-            const len = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+            const len = std.math.cast(Name, try reader.takeInt(u64, .little)) orelse
                 return error.NameTooLarge;
             switch (len) {
                 0 => return error.NameTooSmall,
-                1...std.fs.max_path_bytes => {},
+                1...std.fs.max_name_bytes => {},
                 else => return error.NameTooLarge,
             }
 
@@ -752,7 +755,7 @@ pub fn unpackDirDirect(
         .symlink => {
             expectToken(reader, .symlink) catch unreachable;
 
-            const size = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+            const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
                 return error.NameTooLarge;
             switch (size) {
                 0 => return error.NameTooSmall,
@@ -853,7 +856,7 @@ pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buf: *[std.fs.max_path_bytes]
 
     try expectToken(reader, .symlink);
 
-    const size = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+    const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
         return error.NameTooLarge;
     switch (size) {
         0 => return error.NameTooSmall,
@@ -1083,7 +1086,7 @@ fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
 }
 
 fn unstr(reader: *std.Io.Reader) ![]u8 {
-    const len = std.math.cast(NameLen, try reader.takeInt(u64, .little)) orelse
+    const len = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
         return error.NameTooLarge;
 
     switch (len) {
@@ -1092,7 +1095,7 @@ fn unstr(reader: *std.Io.Reader) ![]u8 {
         else => return error.NameTooLarge,
     }
 
-    const read = try reader.take(std.mem.alignForward(NameLen, len, 8));
+    const read = try reader.take(std.mem.alignForward(Target, len, 8));
 
     if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
 
