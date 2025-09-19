@@ -7,10 +7,10 @@ echo $1
 mkdir $1 || exit 1
 cd $1
 
-nix build git+https://git.lix.systems/lix-project/lix?rev=f4bdddf0fdaabc68546cf561c5343b83d95d2466 -o lix >& /dev/null || exit 1
-nix build github:NixOS/nix/dbc235cc62b0f26d459c1df7b4659ff15abdc718 -o nix >& /dev/null || exit 1
+nix build git+https://git.lix.systems/lix-project/lix?rev=2a622d7de75bc7e228d862cf5bc379c91f38b76c -o lix >& /dev/null || exit 1
+nix build github:NixOS/nix/07b96c1d14ab8695e5071fb73e19049fce8f3b6b -o nix >& /dev/null || exit 1
 nix build github:water-sucks/narz/760736b98e08c7c741838f5ad020d6d2e33b5e57 -o narz >& /dev/null || exit 1
-nix build github:myclevorname/narser/bf7fe48ab40e9f8d5e1823259a70106d1bfada78 -o narser >& /dev/null || exit 1
+nix build github:myclevorname/narser/80a706458098dfef457fc0289010b027db433b14 -o narser >& /dev/null || exit 1
 
 git clone https://github.com/torvalds/linux --depth=1 -q
 cd linux
