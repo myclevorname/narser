@@ -158,9 +158,8 @@ pub const NixArchive = struct {
             },
             .symlink => {
                 const name = try takeTarget(reader);
-                const copied = try self.name_pool.create();
-                @memcpy(copied[0..name.len], name);
-                current.data = .{ .symlink = copied[0..name.len] };
+                const copied = try self.arena.allocator().dupe(u8, name);
+                current.data = .{ .symlink = copied };
                 continue :state .next;
             },
             .next => {
@@ -1012,19 +1011,6 @@ pub const LsOptions = struct {
     recursive: bool = false,
 };
 
-/// Implements the `narser ls` command without following symlinks, included here instead of
-/// `src/main.zig`
-pub fn lsNoFollow(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    path: []const u8,
-    options: LsOptions,
-) !void {
-    _ = .{ allocator, reader, writer, path, options };
-    @panic("TODO");
-}
-
 /// Pumps the contents of a file in the archive via a reader into the writer, not following
 /// symlinks
 pub fn fileContentsNoFollow(
@@ -1036,7 +1022,7 @@ pub fn fileContentsNoFollow(
     std.debug.assert(reader.buffer.len >= @max(std.fs.max_path_bytes, std.fs.max_name_bytes));
 
     var parts: std.ArrayList([]const u8) = .empty;
-    try parts.ensureTotalCapacity(allocator, std.mem.count(u8, path, "/"));
+    try parts.ensureTotalCapacity(allocator, 1 + std.mem.count(u8, path, "/"));
     defer parts.deinit(allocator);
 
     var names: std.MultiArrayList(struct { name: [std.fs.max_name_bytes]u8, len: Name }) = .empty;
@@ -1071,13 +1057,14 @@ pub fn fileContentsNoFollow(
             };
 
             if (try takeToken(reader, .directory)) {
+                if (parts.items.len == 0) return error.IsDir;
                 names.appendAssumeCapacity(.{
                     .name = undefined,
-                    .len = 0, // TODO: Is this okay to do with std.mem.order?
+                    .len = 0,
                 });
                 continue :state .entry_take;
             } else if (try takeToken(reader, .file))
-                continue :state if (parts.items.len == 0) .take_file else return error.NotDir
+                continue :state if (parts.items.len == 0) .take_file else return error.Symlink
             else if (try takeToken(reader, .symlink))
                 return error.IsSymlink;
             unreachable;
@@ -1104,13 +1091,10 @@ pub fn fileContentsNoFollow(
             //    return error.InvalidPadding;
         },
         .take_directory => {
-            if (names.len == names.capacity) {
-                @branchHint(.unlikely);
-                try names.ensureUnusedCapacity(allocator, 1);
-            }
+            if (names.len == parts.items.len) return error.IsDir;
             names.appendAssumeCapacity(.{
                 .name = undefined,
-                .len = 0, // TODO: Is this okay to do with std.mem.order?
+                .len = 0,
             });
             continue :state .entry_take;
         },
@@ -1123,7 +1107,7 @@ pub fn fileContentsNoFollow(
             if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
                 return error.InvalidPadding;
 
-            continue :state .next_skip;
+            continue :state if (skip_depth == 0) .next_take else .next_skip;
         },
         .skip_symlink => {
             const len = try reader.takeInt(u64, .little);
@@ -1134,28 +1118,38 @@ pub fn fileContentsNoFollow(
             if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
                 return error.InvalidPadding;
 
-            continue :state .next_skip;
+            continue :state if (skip_depth == 0) .next_take else .next_skip;
         },
         .skip_directory => {
+            if (try peekToken(reader, .directory_entry_end))
+                continue :state if (skip_depth == 0) .next_take else .next_skip;
+
             skip_depth += 1;
 
-            const len = try reader.takeInt(u64, .little);
-            try reader.discardAll64(len);
-
-            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
-                return error.InvalidPadding;
+            try names.append(allocator, .{
+                .name = undefined,
+                .len = 0,
+            });
 
             continue :state .entry_skip;
         },
-        // .object_type_take
-        // object_type_skip
+        .object_type_take => {
+            if (try takeToken(reader, .directory))
+                continue :state .take_directory
+            else if (try takeToken(reader, .file))
+                continue :state .take_file
+            else if (try takeToken(reader, .symlink))
+                return error.Symlink;
+
+            return error.InvalidToken;
+        },
         .entry_take => {
-            if (names.len == 0)
-                if (try takeToken(reader, .directory_entry_end))
-                    return error.NoSuchFile;
+            //std.debug.print("Taking.\n", .{});
+            if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
             try expectToken(reader, .directory_entry);
 
             const name = try takeName(reader);
+            //std.debug.print("name = {s}\n", .{name});
 
             const name_bufs = names.items(.name);
             const name_lens = names.items(.len);
@@ -1164,27 +1158,66 @@ pub fn fileContentsNoFollow(
             switch (std.mem.order(u8, prev, name)) {
                 .lt => {},
                 .eq => return error.DuplicateObjectName,
-                .gt => return error.NoSuchFile,
+                .gt => return error.WrongDirectoryOrder,
             }
             @memcpy(name_bufs[names.len - 1][0..name.len], name);
             name_lens[names.len - 1] = @intCast(name.len);
 
-            if (std.mem.eql(u8, name, parts.items[names.len - 1]))
-                continue :state .object_type_take
-            else
-                continue :state .object_type_skip;
+            try expectToken(reader, .directory_entry_inner);
+
+            switch (std.mem.order(u8, name, parts.items[names.len - 1])) {
+                .lt => continue :state .object_type_skip,
+                .eq => continue :state .object_type_take,
+                .gt => return error.NoSuchFile,
+            }
         },
-        // .entry_skip
-        // .next_take
-        // .next_skip
+        .entry_skip => {
+            //std.debug.print("Skipping.\n", .{});
+            if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
+            try expectToken(reader, .directory_entry);
+
+            const name = try takeName(reader);
+            //std.debug.print("name = {s}, depth = {}\n", .{name, skip_depth});
+
+            const name_bufs = names.items(.name);
+            const name_lens = names.items(.len);
+            const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
+
+            switch (std.mem.order(u8, prev, name)) {
+                .lt => {},
+                .eq => return error.DuplicateObjectName,
+                .gt => return error.WrongDirectoryOrder,
+            }
+            @memcpy(name_bufs[names.len - 1][0..name.len], name);
+            name_lens[names.len - 1] = @intCast(name.len);
+
+            try expectToken(reader, .directory_entry_inner);
+
+            continue :state .object_type_skip;
+        },
+        .next_take => {
+            std.debug.assert(skip_depth == 0);
+            try expectToken(reader, .directory_entry_end);
+            if (try peekToken(reader, .directory_entry_end)) return error.NoSuchFile;
+            continue :state .entry_take;
+        },
+        .next_skip => {
+            std.debug.assert(skip_depth != 0);
+            try expectToken(reader, .directory_entry_end);
+            while (try takeToken(reader, .directory_entry_end)) {
+                _ = names.pop();
+                skip_depth -= 1;
+                if (skip_depth == 0) continue :state .entry_take;
+            }
+            continue :state .entry_skip;
+        },
         .end => unreachable, // TODO: Fill this in after the TODO in .take_file
-        inline else => |t| @panic("TODO: " ++ @tagName(t)),
     }
 
     comptime unreachable;
 }
 
-/// The array list must reserve at least `std.mem.count(u8, path, "/")` items
+/// The array list must reserve at least `1 + std.mem.count(u8, path, "/")` items
 fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
     var iter = std.mem.splitScalar(u8, path, '/');
 
@@ -1251,7 +1284,10 @@ fn peekToken(reader: *std.Io.Reader, comptime token: Token) !bool {
 
 fn expectToken(reader: *std.Io.Reader, comptime token: Token) !void {
     return if (peekToken(reader, token)) |r| switch (r) {
-        true => reader.toss(getTokenString(token).len),
+        true => {
+            reader.toss(getTokenString(token).len);
+            //std.debug.print("Got token {t}\n", .{token});
+        },
         false => error.InvalidToken,
     } else |e| switch (e) {
         error.ReadFailed => error.ReadFailed,

@@ -10,10 +10,11 @@ const help_message =
     \\
     \\Options:
     \\    -h, -?  Display this help message
-    \\    -l, -L  Long listing (ls)
+    \\    -l      Long listing (ls)
     \\    -r, -R  Recurse (ls)
-    \\    -n      file is not executable (pack, hash)
-    \\    -x      file is executable (pack, hash)
+    \\    -n      File is not executable (pack, hash)
+    \\    -x      File is executable (pack, hash)
+    \\    -L      Follow symlinks at the cost of speed and memory (cat)
     \\
     \\Commands:
     \\    unpack <ARCHIVE> <PATH>
@@ -286,27 +287,17 @@ pub fn main() !void {
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
-        if (!opts.follow) {
-            try narser.lsNoFollow(
-                allocator,
-                &in_reader.interface,
-                writer,
-                subpath,
-                .{ .recursive = opts.recurse, .long = opts.long_listing },
-            );
-        } else {
-            var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{ .store_file_contents = false });
-            defer archive.deinit();
+        var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{ .store_file_contents = false });
+        defer archive.deinit();
 
-            archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
-                error.NotDir => fatal("In archive: expected directory", .{}),
-                error.FileNotFound => fatal("In archive: file not found", .{}),
-                error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-                error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
-            };
-            archive.root.entry = null;
-            try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
-        }
+        archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
+            error.NotDir => fatal("In archive: expected directory", .{}),
+            error.FileNotFound => fatal("In archive: file not found", .{}),
+            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
+        };
+        archive.root.entry = null;
+        try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
