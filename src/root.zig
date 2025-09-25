@@ -1,9 +1,8 @@
 const std = @import("std");
 const tests_path = @import("tests").tests_path;
 
-const Name = std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, std.fs.max_name_bytes + 2));
-
-const Target = std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, std.fs.max_path_bytes + 2));
+const Name = std.meta.Int(.unsigned, 1 + std.math.log2(std.fs.max_name_bytes));
+const Target = std.meta.Int(.unsigned, 1 + std.math.log2(std.fs.max_path_bytes));
 
 /// A Nix Archive file.
 ///
@@ -26,6 +25,8 @@ pub const NixArchive = struct {
         NotANar,
         InvalidToken,
         InvalidPadding,
+        TargetTooSmall,
+        TargetTooLarge,
         NameTooSmall,
         NameTooLarge,
         DuplicateObjectName,
@@ -90,8 +91,7 @@ pub const NixArchive = struct {
                 continue :state .get_entry_inner;
             },
             .get_entry_inner => {
-                const name = try unstr(reader);
-                if (name.len > std.fs.max_path_bytes) return error.NameTooLarge;
+                const name = try takeName(reader);
 
                 const copied = try self.name_pool.create();
                 @memcpy(copied[0..name.len], name);
@@ -157,7 +157,7 @@ pub const NixArchive = struct {
                 continue :state .next;
             },
             .symlink => {
-                const name = try unstr(reader);
+                const name = try takeTarget(reader);
                 const copied = try self.name_pool.create();
                 @memcpy(copied[0..name.len], name);
                 current.data = .{ .symlink = copied[0..name.len] };
@@ -676,15 +676,8 @@ pub fn unpackDirDirect(
                 else => return e,
             };
 
-            const len = std.math.cast(Name, try reader.takeInt(u64, .little)) orelse
-                return error.NameTooLarge;
-            switch (len) {
-                0 => return error.NameTooSmall,
-                1...std.fs.max_name_bytes => {},
-                else => return error.NameTooLarge,
-            }
+            const name = try takeName(reader);
 
-            const name = try reader.take(len);
             if (std.mem.indexOfScalar(u8, name, 0) != null or
                 std.mem.indexOfScalar(u8, name, '/') != null or
                 std.mem.eql(u8, name, ".") or
@@ -702,12 +695,9 @@ pub fn unpackDirDirect(
                 },
             };
 
-            @memcpy(currents.items(.name_buf)[currents.len - 1][0..len], name);
+            @memcpy(currents.items(.name_buf)[currents.len - 1][0..name.len], name);
 
-            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
-                return error.InvalidToken;
-
-            currents.items(.last_name_len)[currents.len - 1] = len;
+            currents.items(.last_name_len)[currents.len - 1] = @intCast(name.len);
 
             try expectToken(reader, .directory_entry_inner);
 
@@ -1017,6 +1007,199 @@ pub const Object = struct {
     }
 };
 
+pub const LsOptions = struct {
+    long: bool = false,
+    recursive: bool = false,
+};
+
+/// Implements the `narser ls` command without following symlinks, included here instead of
+/// `src/main.zig`
+pub fn lsNoFollow(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    path: []const u8,
+    options: LsOptions,
+) !void {
+    _ = .{ allocator, reader, writer, path, options };
+    @panic("TODO");
+}
+
+/// Pumps the contents of a file in the archive via a reader into the writer, not following
+/// symlinks
+pub fn fileContentsNoFollow(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    path: []const u8,
+) !void {
+    std.debug.assert(reader.buffer.len >= @max(std.fs.max_path_bytes, std.fs.max_name_bytes));
+
+    var parts: std.ArrayList([]const u8) = .empty;
+    try parts.ensureTotalCapacity(allocator, std.mem.count(u8, path, "/"));
+    defer parts.deinit(allocator);
+
+    var names: std.MultiArrayList(struct { name: [std.fs.max_name_bytes]u8, len: Name }) = .empty;
+    try names.ensureTotalCapacity(allocator, 64);
+    defer names.deinit(allocator);
+
+    normalizePath(&parts, path);
+
+    var skip_depth: u64 = 0;
+
+    const State = enum {
+        start,
+        take_file,
+        take_directory,
+        skip_file,
+        skip_symlink,
+        skip_directory,
+        object_type_take,
+        object_type_skip,
+        entry_take,
+        entry_skip,
+        next_take,
+        next_skip,
+        end,
+    };
+
+    state: switch (State.start) {
+        .start => {
+            expectToken(reader, .magic) catch |e| switch (e) {
+                error.InvalidToken => return error.NotANar,
+                else => return e,
+            };
+
+            if (try takeToken(reader, .directory)) {
+                names.appendAssumeCapacity(.{
+                    .name = undefined,
+                    .len = 0, // TODO: Is this okay to do with std.mem.order?
+                });
+                continue :state .entry_take;
+            } else if (try takeToken(reader, .file))
+                continue :state if (parts.items.len == 0) .take_file else return error.NotDir
+            else if (try takeToken(reader, .symlink))
+                return error.IsSymlink;
+            unreachable;
+        },
+        .object_type_skip => {
+            if (try takeToken(reader, .directory))
+                continue :state .skip_directory
+            else if (try takeToken(reader, .file))
+                continue :state .skip_file
+            else if (try takeToken(reader, .symlink))
+                continue :state .skip_symlink
+            else
+                return error.InvalidToken;
+        },
+        .take_file => {
+            _ = try takeToken(reader, .executable_file);
+            try expectToken(reader, .file_contents);
+            const len = try reader.takeInt(u64, .little);
+            try reader.streamExact64(writer, len);
+            return; // Skip processing the rest of the archive
+            // TODO: Make it validate the whole archive (low priority)
+
+            //if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+            //    return error.InvalidPadding;
+        },
+        .take_directory => {
+            if (names.len == names.capacity) {
+                @branchHint(.unlikely);
+                try names.ensureUnusedCapacity(allocator, 1);
+            }
+            names.appendAssumeCapacity(.{
+                .name = undefined,
+                .len = 0, // TODO: Is this okay to do with std.mem.order?
+            });
+            continue :state .entry_take;
+        },
+        .skip_file => {
+            _ = try takeToken(reader, .executable_file);
+            try expectToken(reader, .file_contents);
+            const len = try reader.takeInt(u64, .little);
+            try reader.discardAll64(len);
+
+            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                return error.InvalidPadding;
+
+            continue :state .next_skip;
+        },
+        .skip_symlink => {
+            const len = try reader.takeInt(u64, .little);
+            if (len == 0) return error.TargetTooSmall;
+            if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
+            try reader.discardAll64(len);
+
+            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                return error.InvalidPadding;
+
+            continue :state .next_skip;
+        },
+        .skip_directory => {
+            skip_depth += 1;
+
+            const len = try reader.takeInt(u64, .little);
+            try reader.discardAll64(len);
+
+            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                return error.InvalidPadding;
+
+            continue :state .entry_skip;
+        },
+        // .object_type_take
+        // object_type_skip
+        .entry_take => {
+            if (names.len == 0)
+                if (try takeToken(reader, .directory_entry_end))
+                    return error.NoSuchFile;
+            try expectToken(reader, .directory_entry);
+
+            const name = try takeName(reader);
+
+            const name_bufs = names.items(.name);
+            const name_lens = names.items(.len);
+            const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
+
+            switch (std.mem.order(u8, prev, name)) {
+                .lt => {},
+                .eq => return error.DuplicateObjectName,
+                .gt => return error.NoSuchFile,
+            }
+            @memcpy(name_bufs[names.len - 1][0..name.len], name);
+            name_lens[names.len - 1] = @intCast(name.len);
+
+            if (std.mem.eql(u8, name, parts.items[names.len - 1]))
+                continue :state .object_type_take
+            else
+                continue :state .object_type_skip;
+        },
+        // .entry_skip
+        // .next_take
+        // .next_skip
+        .end => unreachable, // TODO: Fill this in after the TODO in .take_file
+        inline else => |t| @panic("TODO: " ++ @tagName(t)),
+    }
+
+    comptime unreachable;
+}
+
+/// The array list must reserve at least `std.mem.count(u8, path, "/")` items
+fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
+    var iter = std.mem.splitScalar(u8, path, '/');
+
+    var cur: ?[]const u8 = iter.first();
+
+    while (cur) |c| : (cur = iter.next()) {
+        if (c.len == 0 or std.mem.eql(u8, c, ".")) continue;
+        if (std.mem.eql(u8, c, "..")) {
+            _ = out.pop();
+            continue;
+        }
+        out.appendAssumeCapacity(c);
+    }
+}
+
 const Token = enum {
     magic,
     archive_end,
@@ -1085,15 +1268,25 @@ fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
     try writer.writeAll(concatenated);
 }
 
-fn unstr(reader: *std.Io.Reader) ![]u8 {
-    const len = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
+fn takeName(reader: *std.Io.Reader) ![]u8 {
+    const len = std.math.cast(Name, try reader.takeInt(u64, .little)) orelse
         return error.NameTooLarge;
+    if (len == 0) return error.NameTooSmall;
+    if (len > std.fs.max_name_bytes) return error.NameTooLarge;
 
-    switch (len) {
-        0 => return error.NameTooSmall,
-        1...std.fs.max_path_bytes => {},
-        else => return error.NameTooLarge,
-    }
+    const read = try reader.take(std.mem.alignForward(Name, len, 8));
+
+    if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
+
+    return read[0..len];
+}
+
+fn takeTarget(reader: *std.Io.Reader) ![]u8 {
+    const len = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
+        return error.TargetTooLarge;
+
+    if (len == 0) return error.TargetTooSmall;
+    if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
 
     const read = try reader.take(std.mem.alignForward(Target, len, 8));
 

@@ -44,9 +44,7 @@ const help_message =
     \\
 ;
 
-const LsOptions = struct { long: bool, recursive: bool };
-
-pub fn ls(archive: *const narser.NixArchive, writer: *std.Io.Writer, opts: LsOptions) !void {
+pub fn ls(archive: *const narser.NixArchive, writer: *std.Io.Writer, opts: narser.LsOptions) !void {
     var node = archive.root;
 
     if (opts.long) switch (node.data) {
@@ -200,13 +198,15 @@ pub fn main() !void {
         long_listing: bool = false,
         recurse: bool = false,
         executable: ?bool = null,
+        follow: bool = false,
     };
     var opts: Options = .{};
 
     while (opts_iter.next()) |arg| switch (arg) {
         .option => |opt| switch (opt) {
             'h', '?' => opts.show_help = true,
-            'l', 'L' => opts.long_listing = true,
+            'l' => opts.long_listing = true,
+            'L' => opts.follow = true,
             'r', 'R' => opts.recurse = true,
             'n' => opts.executable = false,
             'x' => opts.executable = true,
@@ -284,18 +284,29 @@ pub fn main() !void {
         var in_buf: [4096]u8 = undefined;
         var in_reader = in_file.reader(&in_buf);
 
-        var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{ .store_file_contents = false });
-        defer archive.deinit();
-
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
-        archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.NotDir => fatal("In archive: expected directory", .{}),
-            error.FileNotFound => fatal("In archive: file not found", .{}),
-            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
-        };
-        archive.root.entry = null;
-        try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
+
+        if (!opts.follow) {
+            try narser.lsNoFollow(
+                allocator,
+                &in_reader.interface,
+                writer,
+                subpath,
+                .{ .recursive = opts.recurse, .long = opts.long_listing },
+            );
+        } else {
+            var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{ .store_file_contents = false });
+            defer archive.deinit();
+
+            archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
+                error.NotDir => fatal("In archive: expected directory", .{}),
+                error.FileNotFound => fatal("In archive: file not found", .{}),
+                error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+                error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
+            };
+            archive.root.entry = null;
+            try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
+        }
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
@@ -307,26 +318,30 @@ pub fn main() !void {
         var in_buf: [4096]u8 = undefined;
         var in_reader = in_file.reader(&in_buf);
 
-        var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{});
-        defer archive.deinit();
+        if (!opts.follow) {
+            try narser.fileContentsNoFollow(allocator, &in_reader.interface, writer, subpath);
+        } else {
+            var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{});
+            defer archive.deinit();
 
-        switch (archive.root.data) {
-            .directory => |child| if (child == null) fatal("Archive is an empty directory", .{}),
-            .file => {},
-            .symlink => fatal("narser does not support following symbolic links to the filesystem", .{}),
-        }
+            switch (archive.root.data) {
+                .directory => |child| if (child == null) fatal("Archive is an empty directory", .{}),
+                .file => {},
+                .symlink => fatal("narser does not support following symbolic links to the filesystem", .{}),
+            }
 
-        const sub = archive.root.subPath(subpath) catch |e| switch (e) {
-            error.NotDir => fatal("In archive: expected directory", .{}),
-            error.FileNotFound => fatal("In archive: file not found", .{}),
-            error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
-            error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
-        };
+            const sub = archive.root.subPath(subpath) catch |e| switch (e) {
+                error.NotDir => fatal("In archive: expected directory", .{}),
+                error.FileNotFound => fatal("In archive: file not found", .{}),
+                error.PathOutsideArchive => fatal("narser does not support following symbolic links to the filesystem", .{}),
+                error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
+            };
 
-        switch (sub.data) {
-            .file => |metadata| try writer.writeAll(metadata.contents),
-            .symlink => fatal("In archive: expected file, found symlink", .{}),
-            .directory => fatal("In archive: expected file, found directory", .{}),
+            switch (sub.data) {
+                .file => |metadata| try writer.writeAll(metadata.contents),
+                .symlink => fatal("In archive: expected file, found symlink", .{}),
+                .directory => fatal("In archive: expected file, found directory", .{}),
+            }
         }
     } else if (std.mem.eql(u8, "unpack", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
