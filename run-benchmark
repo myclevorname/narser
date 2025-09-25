@@ -55,7 +55,8 @@ poop "./nix/bin/nix nar ls linux.nar /" "./lix/bin/nix nar ls linux.nar /" "./na
 poop "./nix/bin/nix nar ls linux.nar / -R" "./lix/bin/nix nar ls linux.nar / -R" "./narser/bin/narser ls linux.nar / -R" "./nix-nar/bin/nix-nar ls linux.nar / -R" "./narz/bin/narz ls linux.nar / -r"
 poop "./nix/bin/nix nar ls linux.nar / -Rl" "./lix/bin/nix nar ls linux.nar / -Rl" "./narser/bin/narser ls linux.nar / -Rl" "./nix-nar/bin/nix-nar ls linux.nar / -Rl" "./narz/bin/narz ls linux.nar / -rl"
 poop "./nix/bin/nix nar ls linux.nar / -l" "./lix/bin/nix nar ls linux.nar / -l" "./narser/bin/narser ls linux.nar / -l" "./nix-nar/bin/nix-nar ls linux.nar / -l" "./narz/bin/narz ls linux.nar / -l"
-poop "./nix/bin/nix nar cat linux.nar /README" "./lix/bin/nix nar cat linux.nar /README" "./narser/bin/narser cat linux.nar /README" "./narser/bin/narser cat linux.nar /README -L" "./nix-nar/bin/nix-nar cat linux.nar /README" "./narz/bin/narz cat linux.nar /README"
+poop "./nix/bin/nix nar cat linux.nar /README" "./lix/bin/nix nar cat linux.nar /README" "./narser/bin/narser cat linux.nar /README" "./narser/bin/narser cat linux.nar /README -L" "./nix-nar/bin/nix-nar cat linux.nar /README " "./narz/bin/narz cat linux.nar /README"
+poop "./nix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./lix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -L" "./nix-nar/bin/nix-nar cat linux.nar /virt/lib/irqbypass.c " "./narz/bin/narz cat linux.nar /virt/lib/irqbypass.c"
 
 ./nix/bin/nix-store --restore out < linux.nar
 cmp <(./nix/bin/nix nar pack out) linux.nar
