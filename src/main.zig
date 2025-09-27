@@ -45,7 +45,12 @@ const help_message =
     \\
 ;
 
-pub fn ls(archive: *const narser.NixArchive, writer: *std.Io.Writer, opts: narser.LsOptions) !void {
+const LsOptions = struct {
+    long: bool = false,
+    recursive: bool = false,
+};
+
+fn ls(archive: narser.NixArchive, writer: *std.Io.Writer, opts: LsOptions) !void {
     var node = archive.root;
 
     if (opts.long) switch (node.data) {
@@ -297,7 +302,7 @@ pub fn main() !void {
             error.NestedTooDeep => fatal("Too many nested symlinks", .{}),
         };
         archive.root.entry = null;
-        try ls(&archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
+        try ls(archive, writer, .{ .recursive = opts.recurse, .long = opts.long_listing });
     } else if (std.mem.eql(u8, "cat", command)) {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
@@ -310,7 +315,7 @@ pub fn main() !void {
         var in_reader = in_file.reader(&in_buf);
 
         if (!opts.follow) {
-            try narser.fileContentsNoFollow(allocator, &in_reader.interface, writer, subpath);
+            _ = try narser.fileContentsNoFollow(allocator, &in_reader.interface, writer, subpath);
         } else {
             var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{});
             defer archive.deinit();

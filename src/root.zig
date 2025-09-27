@@ -20,7 +20,10 @@ pub const NixArchive = struct {
     root: *Object,
     name_pool: std.heap.MemoryPool([std.fs.max_name_bytes]u8),
 
-    pub const FromReaderOptions = struct { store_file_contents: bool = true };
+    pub const FromReaderOptions = struct {
+        /// The length of each file is always stored
+        store_file_contents: bool = true,
+    };
     pub const FromReaderError = std.mem.Allocator.Error || std.Io.Reader.Error || error{
         NotANar,
         InvalidToken,
@@ -34,6 +37,7 @@ pub const NixArchive = struct {
         FileTooLarge,
     };
 
+    /// Returns a Nix archive from the given reader. Data after the end of the archive is not read.
     pub fn fromReader(
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
@@ -202,7 +206,7 @@ pub const NixArchive = struct {
     }
 
     /// Converts the contents of a directory into a Nix archive. The directory passed must be
-    /// opened with `.{ .iterate = true }`
+    /// opened with iteration capabilities.
     pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NixArchive {
         var self: NixArchive = .{
             .arena = .init(allocator),
@@ -714,7 +718,7 @@ pub fn unpackDirDirect(
         },
         .file => {
             expectToken(reader, .file) catch unreachable;
-            const exec_token = comptime getTokenString(.executable_file);
+            const exec_token = getTokenString(.executable_file);
             const is_executable = std.mem.eql(u8, try reader.peek(exec_token.len), exec_token);
             if (is_executable) reader.toss(exec_token.len);
 
@@ -809,7 +813,9 @@ pub fn unpackDirDirect(
     comptime unreachable;
 }
 
-/// Returns whether the file is executable
+/// Reads a Nix archive containing a single file from the reader and writes it to the writer.
+/// Returns whether the file is executable. This is faster and more memory-efficient than calling
+/// `fromReader` followed by `dumpFile`.
 pub fn unpackFileDirect(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
     expectToken(reader, .magic) catch |e| switch (e) {
         error.InvalidToken => return error.NotANar,
@@ -837,7 +843,9 @@ pub fn unpackFileDirect(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
     return is_executable;
 }
 
-pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buf: *[std.fs.max_path_bytes]u8) ![]u8 {
+/// Reads a Nix archive containing a single symlink and returns the target. This is faster and
+/// more memory-efficient than calling `fromReader`.
+pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
     expectToken(reader, .magic) catch |e| switch (e) {
         error.InvalidToken => return error.NotANar,
         error.ReadFailed => return e,
@@ -853,20 +861,28 @@ pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buf: *[std.fs.max_path_bytes]
         else => return error.NameTooLarge,
     }
 
-    @memcpy(buf[0..size], try reader.take(size));
+    @memcpy(buffer[0..size], try reader.take(size));
 
     if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
         return error.InvalidToken;
 
     try expectToken(reader, .archive_end);
-    return buf[0..size];
+    return buffer[0..size];
 }
 
+/// Returns the type of archive in the reader. Asserts the reader buffer is at least 80 bytes.
 pub fn archiveType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
-    const magic = comptime getTokenString(.magic);
-    const file = comptime getTokenString(.file);
-    const directory = comptime getTokenString(.directory);
-    const symlink = comptime getTokenString(.symlink);
+    const magic = getTokenString(.magic);
+    const file = getTokenString(.file);
+    const directory = getTokenString(.directory);
+    const symlink = getTokenString(.symlink);
+
+    if (magic.len + directory.len != 80) {
+        @compileLog(magic.len + directory.len);
+        @compileError("archiveType doc comment needs updated");
+    }
+
+    std.debug.assert(reader.buffer.len >= magic.len + directory.len);
 
     if (!std.mem.eql(u8, try reader.peek(magic.len), magic)) return error.NotANar;
 
@@ -889,6 +905,7 @@ pub fn archiveType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
 }
 
 pub const Object = struct {
+    /// null iff the root of the archive
     entry: ?DirectoryEntry,
     data: Data,
 
@@ -910,8 +927,11 @@ pub const Object = struct {
         contents: []u8,
     };
 
-    pub fn insertChild(self: *Object, child: *Object) error{DuplicateObjectName}!void {
-        if (self.data.directory) |first|
+    /// Makes the child a child of the parent object. Asserts the object is a directory.
+    /// This only fails if a child with the same name already exists.
+    pub fn insertChild(parent: *Object, child: *Object) error{DuplicateObjectName}!void {
+        std.debug.assert(parent.data == .directory);
+        if (parent.data.directory) |first|
             switch (std.mem.order(u8, first.entry.?.name, child.entry.?.name)) {
                 .lt => {
                     var left = first;
@@ -937,18 +957,18 @@ pub const Object = struct {
                 .gt => {
                     first.entry.?.prev = child;
                     child.entry.?.next = first;
-                    self.data.directory = child;
+                    parent.data.directory = child;
                 },
             }
         else
-            self.data.directory = child;
+            parent.data.directory = child;
     }
 
     /// Traverses an Object, following symbolic links.
     pub fn subPath(self: *Object, subpath: []const u8) !*Object {
         var cur = self;
         var parts_buf: [4096][]const u8 = undefined;
-        var parts: std.ArrayListUnmanaged([]const u8) = .initBuffer(&parts_buf);
+        var parts: std.ArrayList([]const u8) = .initBuffer(&parts_buf);
         if (self.entry != null and self.data == .symlink)
             if (self.data.symlink[0] == '/')
                 return error.PathOutsideArchive
@@ -1006,19 +1026,16 @@ pub const Object = struct {
     }
 };
 
-pub const LsOptions = struct {
-    long: bool = false,
-    recursive: bool = false,
-};
-
-/// Pumps the contents of a file in the archive via a reader into the writer, not following
-/// symlinks
+/// Pumps the contents of a file in the archive via a reader into the writer without fillowing
+/// symlinks. Returns whether the file was executable. THis is faster and more memory-efficient
+/// than calling `fromReader` followed by `subPath`. Asserts the reader's buffer contains at least
+/// `@max(std.fs.max_name_bytes, std.fs.max_path_bytes)` bytes.
 pub fn fileContentsNoFollow(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     path: []const u8,
-) !void {
+) !bool {
     std.debug.assert(reader.buffer.len >= @max(std.fs.max_path_bytes, std.fs.max_name_bytes));
 
     var parts: std.ArrayList([]const u8) = .empty;
@@ -1046,7 +1063,6 @@ pub fn fileContentsNoFollow(
         entry_skip,
         next_take,
         next_skip,
-        end,
     };
 
     state: switch (State.start) {
@@ -1080,15 +1096,11 @@ pub fn fileContentsNoFollow(
                 return error.InvalidToken;
         },
         .take_file => {
-            _ = try takeToken(reader, .executable_file);
+            const executable = try takeToken(reader, .executable_file);
             try expectToken(reader, .file_contents);
             const len = try reader.takeInt(u64, .little);
             try reader.streamExact64(writer, len);
-            return; // Skip processing the rest of the archive
-            // TODO: Make it validate the whole archive (low priority)
-
-            //if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
-            //    return error.InvalidPadding;
+            return executable; // Skip processing the rest of the archive
         },
         .take_directory => {
             if (names.len == parts.items.len) return error.IsDir;
@@ -1211,7 +1223,6 @@ pub fn fileContentsNoFollow(
             }
             continue :state .entry_skip;
         },
-        .end => unreachable, // TODO: Fill this in after the TODO in .take_file
     }
 
     comptime unreachable;
@@ -1259,11 +1270,13 @@ const token_map = std.StaticStringMap(Token).initComptime(.{
     .{ str("node") ++ str("("), .directory_entry_inner },
 });
 
-fn getTokenString(comptime value: Token) []const u8 {
-    const values = token_map.values();
-    const index = std.mem.indexOfScalar(Token, values, value).?;
+inline fn getTokenString(comptime value: Token) []const u8 {
+    comptime {
+        const values = token_map.values();
+        const index = std.mem.indexOfScalar(Token, values, value).?;
 
-    return token_map.keys()[index];
+        return token_map.keys()[index];
+    }
 }
 
 fn takeToken(reader: *std.Io.Reader, comptime token: Token) error{ReadFailed}!bool {
