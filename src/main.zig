@@ -345,7 +345,7 @@ pub fn main() !void {
 
         var file = try std.fs.cwd().openFile(archive_path, .{});
         defer file.close();
-        var fbuf: [4096 * 128]u8 = undefined;
+        var fbuf: [4096 * 32]u8 = undefined;
         var fr = file.reader(&fbuf);
         const reader = &fr.interface;
 
@@ -360,7 +360,7 @@ pub fn main() !void {
             .directory => {
                 var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
                 defer dir.close();
-                var fw_buf: [4096 * 4]u8 = undefined;
+                var fw_buf: [4096 * 8]u8 = undefined;
                 try narser.unpackDirDirect(allocator, reader, dir, &fw_buf);
             },
             .file => if (target_path == null or std.mem.eql(u8, "-", target_path.?)) {
