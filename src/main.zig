@@ -236,12 +236,16 @@ pub fn main() !void {
         const used_writer = if (use_hasher) &hash_upd.writer else writer;
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
+        var in_buf: [4096]u8 = undefined;
+
         if (std.mem.eql(u8, "-", argument)) {
+            var fr = std.fs.File.stdin().reader(&in_buf);
             try narser.dumpFile(
                 allocator,
-                std.fs.File.stdin(),
+                &fr.interface,
+                writer,
                 opts.executable orelse false,
-                used_writer,
+                fr.getSize() catch null,
             );
         } else {
             var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
@@ -260,11 +264,13 @@ pub fn main() !void {
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
+                        var fr = file.reader(&in_buf);
                         try narser.dumpFile(
                             allocator,
-                            file,
-                            opts.executable orelse null,
-                            used_writer,
+                            &fr.interface,
+                            writer,
+                            stat.mode & 0o111 != 0,
+                            fr.getSize() catch null,
                         );
                     },
                 }
@@ -345,7 +351,7 @@ pub fn main() !void {
 
         var file = try std.fs.cwd().openFile(archive_path, .{});
         defer file.close();
-        var fbuf: [4096 * 32]u8 = undefined;
+        var fbuf: [4096 * 64]u8 = undefined;
         var fr = file.reader(&fbuf);
         const reader = &fr.interface;
 

@@ -596,41 +596,41 @@ pub fn dumpDirectory(
     try writeTokens(writer, &.{.archive_end});
 }
 
-/// Takes a file and serializes it as a Nix Archive into `writer`. This is faster and more
-/// memory-efficient than calling `fromFileContents` followed by `dump`.
-pub fn dumpFile(allocator: std.mem.Allocator, file: std.fs.File, executable: ?bool, writer: *std.Io.Writer) !void {
-    const stat = try file.stat();
-    const is_executable = executable orelse (stat.mode & 0o111 != 0);
+/// Takes a reader and serializes its contents as a Nix Archive of a file into `writer`. This is
+/// faster and more memory-efficient than calling `fromFileContents` followed by `dump`.
+pub fn dumpFile(allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, executable: bool, size: ?u64) !void {
     try writeTokens(writer, &.{ .magic, .file });
-    if (is_executable) try writeTokens(writer, &.{.executable_file});
+    if (executable) try writeTokens(writer, &.{.executable_file});
     try writeTokens(writer, &.{.file_contents});
 
-    var buf: [4096]u8 = undefined;
-    var fr = file.reader(&buf);
-
-    const size = blk: {
-        if (fr.getSize()) |s| {
+    const sz = blk: {
+        if (size) |s| {
             try writer.writeInt(u64, s, .little);
 
-            const read = try writer.sendFileAll(&fr, .limited64(s));
-
-            if (read != s) return error.EndOfStream;
+            try reader.streamExact64(writer, s);
 
             break :blk s;
-        } else |_| {
+        } else {
             var aw = std.Io.Writer.Allocating.init(allocator);
             defer aw.deinit();
 
-            try aw.ensureUnusedCapacity(fr.interface.buffer.len);
+            try aw.ensureUnusedCapacity(reader.buffer.len);
 
-            const s = try aw.writer.sendFileAll(&fr, .unlimited);
+            const s = s: {
+                var total: u64 = 0;
+                var read = try reader.streamRemaining(&aw.writer);
+                while (read != 0) {
+                    total += read;
+                    read = try reader.streamRemaining(&aw.writer);
+                }
+                break :s total;
+            };
             try writer.writeInt(u64, s, .little);
             try writer.writeAll(aw.written());
             break :blk s;
         }
     };
-    const zeroes: [8]u8 = .{0} ** 8;
-    try writer.writeAll(zeroes[0..@intCast((8 - size % 8) % 8)]);
+    try writePadding(writer, sz);
 
     try writeTokens(writer, &.{.archive_end});
 }
@@ -815,7 +815,7 @@ pub fn unpackDirDirect(
 
 /// Reads a Nix archive containing a single file from the reader and writes it to the writer.
 /// Returns whether the file is executable. This is faster and more memory-efficient than calling
-/// `fromReader` followed by `dumpFile`.
+/// `fromReader` followed by `dump`.
 pub fn unpackFileDirect(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
     expectToken(reader, .magic) catch |e| switch (e) {
         error.InvalidToken => return error.NotANar,
