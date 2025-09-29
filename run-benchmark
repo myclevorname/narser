@@ -7,10 +7,11 @@ echo $1
 mkdir $1 || exit 1
 cd $1
 
-nix build git+https://git.lix.systems/lix-project/lix?rev=992c3ae981e75c902f72e8a04b44e902e9501642 -o lix >& /dev/null || exit 1
-nix build github:NixOS/nix/89141f1d675768cf98c757c539108ce663adda01 -o nix >& /dev/null || exit 1
-nix build git+https://git.sr.ht/~watersucks/narz?rev=f790364c93142affa3cc699365545d6a11916a76 -o narz >& /dev/null || exit 1
-nix build github:myclevorname/narser/5b5239168adfda18d6ec60afeed5cf30c965f58a -o narser >& /dev/null || exit 1
+nix build git+https://git.lix.systems/lix-project/lix?rev=f31e8e2b55419c7f250f29ae6fbc59be4a4c259e -o lix >& /dev/null || exit 1
+nix build github:NixOS/nix/b0431a76f5645c43a60137401b76c22ba1710e1e -o nix >& /dev/null || exit 1
+# narz fails in f790364c93142affa3cc699365545d6a11916a76
+nix build git+https://git.sr.ht/~watersucks/narz?rev=760736b98e08c7c741838f5ad020d6d2e33b5e57 -o narz >& /dev/null || exit 1
+nix build github:myclevorname/narser/b1dcf42285078137e0da5ded316039f81293a479 -o narser >& /dev/null || exit 1
 nix build gitlab:abstract-binary/nix-nar-rs/c8d9250b9be837abafa0046cb9c2a852b846da6a -o nix-nar >& /dev/null || exit 1
 
 git clone https://github.com/torvalds/linux --depth=1 -q
