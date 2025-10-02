@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     const use_llvm = b.option(bool, "use-llvm", "Use the LLVM backend");
     const no_bin = b.option(bool, "no-bin", "Don't generate a binary (useful with -fincremental)") orelse false;
     const strip = b.option(bool, "strip", "Remove debugging symbols");
+    const emit_docs = b.option(bool, "emit-docs", "Generate usage documentation") orelse false;
 
     if (target.result.os.tag == .windows or target.result.os.tag == .wasi)
         @panic("Target OS does not support the executable file attribute.");
@@ -38,6 +39,12 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&exe.step)
     else
         b.installArtifact(exe);
+
+    if (emit_docs) b.installDirectory(.{
+        .source_dir = exe.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "doc",
+    });
 
     const run_cmd = b.addRunArtifact(exe);
 

@@ -390,7 +390,7 @@ pub const NixArchive = struct {
     }
 
     /// Unpacks a Nix archive into a directory.
-    pub fn unpackDir(self: NixArchive, target_dir: std.fs.Dir) !void {
+    pub fn unpackDirectory(self: NixArchive, target_dir: std.fs.Dir) !void {
         if (self.root.data.directory == null) return;
 
         var item_buf: [256]std.fs.Dir = undefined;
@@ -449,427 +449,634 @@ pub const NixArchive = struct {
         }
     }
 
+    /// Takes a directory and serializes it as a Nix Archive into `writer`. This is faster and more
+    /// memory-efficient than calling `fromDirectory` followed by `dump`.
+    pub fn dumpDirectory(
+        allocator: std.mem.Allocator,
+        dir: std.fs.Dir,
+        writer: *std.Io.Writer,
+    ) !void {
+        // Idea: Make a list of nodes sorted by least depth to most depth, followed by names sorted
+        // in reverse. Reading the next node is as easy as popping. `dir_indicies` is to keep track
+        // of where the contents of each directory end.
+
+        var node_names: std.heap.MemoryPoolAligned([std.fs.max_name_bytes]u8, .@"64") = .init(allocator);
+        defer node_names.deinit();
+
+        var nodes: std.MultiArrayList(struct {
+            kind: std.meta.Tag(Object.Data),
+            name: []u8,
+        }) = .empty;
+        defer nodes.deinit(allocator);
+
+        var dirs: std.ArrayList(std.fs.Dir.Iterator) = try .initCapacity(allocator, 1);
+        defer dirs.deinit(allocator);
+        errdefer for (dirs.items[1..]) |*d| d.dir.close();
+
+        var dir_indicies: std.ArrayList(usize) = .empty;
+        defer dir_indicies.deinit(allocator);
+
+        dirs.appendAssumeCapacity(dir.iterate());
+
+        const Scan = enum { scan_directory, print };
+
+        try writeTokens(writer, &.{ .magic, .directory });
+
+        loop: switch (Scan.scan_directory) {
+            .scan_directory => {
+                try dir_indicies.append(allocator, nodes.len);
+                var last_iter = &dirs.items[dirs.items.len - 1];
+                while (try last_iter.next()) |entry| {
+                    try nodes.append(allocator, .{
+                        .name = blk: {
+                            var name = try node_names.create();
+                            @memcpy(name[0..entry.name.len], entry.name);
+                            break :blk name[0..entry.name.len];
+                        },
+                        .kind = switch (entry.kind) {
+                            .sym_link => .symlink,
+                            .directory => .directory,
+                            else => .file,
+                        },
+                    });
+                }
+                nodes.sortSpanUnstable(dir_indicies.getLast(), nodes.len, struct {
+                    names: []const []const u8,
+
+                    pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                        return std.mem.order(
+                            u8,
+                            ctx.names[a],
+                            ctx.names[b],
+                        ) == .gt;
+                    }
+                }{ .names = nodes.items(.name) });
+                continue :loop .print;
+            },
+            .print => {
+                while (nodes.len > dir_indicies.getLast() and nodes.len > 0) {
+                    const cur = nodes.pop().?;
+                    const name = cur.name;
+                    defer node_names.destroy(@ptrCast(@alignCast(name)));
+
+                    try writeTokens(writer, &.{.directory_entry});
+                    try writeStr(writer, name);
+                    try writeTokens(writer, &.{.directory_entry_inner});
+                    switch (cur.kind) {
+                        .directory => {
+                            try writeTokens(writer, &.{.directory});
+                            try dirs.ensureUnusedCapacity(allocator, 1);
+                            const d = try dirs.getLast().dir.openDir(name, .{ .iterate = true });
+                            dirs.appendAssumeCapacity(d.iterateAssumeFirstIteration());
+                            continue :loop .scan_directory;
+                        },
+                        .file => {
+                            try writeTokens(writer, &.{.file});
+                            var file = try dirs.getLast().dir.openFile(name, .{});
+                            defer file.close();
+                            if (try file.mode() & 0o111 != 0)
+                                try writeTokens(writer, &.{.executable_file});
+                            try writeTokens(writer, &.{.file_contents});
+
+                            var fr = file.reader(&.{});
+
+                            if (fr.getSize()) |size| {
+                                try writer.writeInt(u64, size, .little);
+                                var left = size;
+                                while (left != 0) {
+                                    const read = try writer.sendFileAll(&fr, .limited64(size));
+                                    left -= read;
+                                    if (read == 0 and left != 0) return error.EndOfStream;
+                                }
+                                try writePadding(writer, size);
+                            } else |_| {
+                                @branchHint(.unlikely);
+                                var aw: std.Io.Writer.Allocating = .init(allocator);
+                                defer aw.deinit();
+
+                                try aw.ensureUnusedCapacity(fr.interface.buffer.len);
+
+                                while (try aw.writer.sendFileAll(&fr, .unlimited) != 0) {}
+                                const size = aw.writer.buffered().len;
+                                try writer.writeInt(u64, size, .little);
+                                try writer.writeAll(aw.writer.buffered());
+                                try writePadding(writer, size);
+                            }
+                        },
+                        .symlink => {
+                            try writeTokens(writer, &.{.symlink});
+                            var buf: [std.fs.max_path_bytes]u8 = undefined;
+                            const link = dirs.getLast().dir.readLink(name, &buf) catch |e|
+                                switch (e) {
+                                    error.NameTooLong => unreachable,
+                                    else => return e,
+                                };
+                            try writeStr(writer, link);
+                        },
+                    }
+
+                    try writeTokens(writer, &.{.directory_entry_end});
+                } else {
+                    if (dirs.items.len == 1) break :loop;
+                    try writeTokens(writer, &.{.directory_entry_end});
+                    _ = dir_indicies.pop().?;
+                    var d = dirs.pop().?;
+                    d.dir.close();
+                    continue :loop .print;
+                }
+            },
+        }
+
+        try writeTokens(writer, &.{.archive_end});
+    }
+
+    /// Takes a reader and serializes its contents as a Nix Archive of a file into `writer`. This is
+    /// faster and more memory-efficient than calling `fromFileContents` followed by `dump`.
+    pub fn dumpFile(
+        allocator: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        writer: *std.Io.Writer,
+        executable: bool,
+        size: ?u64,
+    ) !void {
+        try writeTokens(writer, &.{ .magic, .file });
+        if (executable) try writeTokens(writer, &.{.executable_file});
+        try writeTokens(writer, &.{.file_contents});
+
+        const sz = blk: {
+            if (size) |s| {
+                try writer.writeInt(u64, s, .little);
+
+                try reader.streamExact64(writer, s);
+
+                break :blk s;
+            } else {
+                var aw = std.Io.Writer.Allocating.init(allocator);
+                defer aw.deinit();
+
+                try aw.ensureUnusedCapacity(reader.buffer.len);
+
+                const s = s: {
+                    var total: u64 = 0;
+                    var read = try reader.streamRemaining(&aw.writer);
+                    while (read != 0) {
+                        total += read;
+                        read = try reader.streamRemaining(&aw.writer);
+                    }
+                    break :s total;
+                };
+                try writer.writeInt(u64, s, .little);
+                try writer.writeAll(aw.written());
+                break :blk s;
+            }
+        };
+        try writePadding(writer, sz);
+
+        try writeTokens(writer, &.{.archive_end});
+    }
+
+    pub fn dumpSymlink(target: []const u8, writer: *std.Io.Writer) !void {
+        try writeTokens(writer, &.{ .magic, .symlink });
+        try writeStr(writer, target);
+        try writeTokens(writer, &.{.archive_end});
+    }
+
+    pub fn unpackDirectoryReader(
+        allocator: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        out_dir: std.fs.Dir,
+        file_out_buffer: []u8,
+    ) !void {
+        std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
+
+        var currents: std.MultiArrayList(struct {
+            name_buf: [std.fs.max_name_bytes]u8 = undefined,
+            last_name_len: ?Name = null,
+            dir: std.fs.Dir,
+        }) = .empty;
+        defer currents.deinit(allocator);
+
+        defer if (currents.len > 1) for (currents.items(.dir)[1..]) |*d| d.close();
+
+        try currents.append(allocator, .{ .dir = out_dir });
+
+        const State = enum { directory_entry, directory, file, symlink, end, leave_directory };
+
+        expectToken(reader, .magic) catch |e| switch (e) {
+            error.InvalidToken => return error.NotANar,
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        expectToken(reader, .directory) catch |e| switch (e) {
+            error.InvalidToken => return error.WrongArchiveType,
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        state: switch (State.directory_entry) {
+            .directory_entry => {
+                expectToken(reader, .directory_entry) catch |e| switch (e) {
+                    error.InvalidToken => continue :state .leave_directory,
+                    else => return e,
+                };
+
+                const name = try takeName(reader);
+
+                if (std.mem.indexOfScalar(u8, name, 0) != null or
+                    std.mem.indexOfScalar(u8, name, '/') != null or
+                    std.mem.eql(u8, name, ".") or
+                    std.mem.eql(u8, name, ".."))
+                {
+                    return error.MaliciousArchive;
+                }
+
+                const cur = currents.get(currents.len - 1);
+                if (cur.last_name_len) |l| switch (std.mem.order(u8, cur.name_buf[0..l], name)) {
+                    .lt => {},
+                    .eq => return error.DuplicateObjectName,
+                    .gt => {
+                        return error.WrongDirectoryOrder;
+                    },
+                };
+
+                @memcpy(currents.items(.name_buf)[currents.len - 1][0..name.len], name);
+
+                currents.items(.last_name_len)[currents.len - 1] = @intCast(name.len);
+
+                try expectToken(reader, .directory_entry_inner);
+
+                const file_string = getTokenString(.file);
+                const directory_string = getTokenString(.directory);
+                const symlink_string = getTokenString(.symlink);
+                if (std.mem.eql(u8, file_string, try reader.peek(file_string.len)))
+                    continue :state .file
+                else if (std.mem.eql(u8, directory_string, try reader.peek(directory_string.len)))
+                    continue :state .directory
+                else if (std.mem.eql(u8, symlink_string, try reader.peek(symlink_string.len)))
+                    continue :state .symlink
+                else
+                    return error.InvalidToken;
+            },
+            .file => {
+                expectToken(reader, .file) catch unreachable;
+                const exec_token = getTokenString(.executable_file);
+                const is_executable = std.mem.eql(u8, try reader.peek(exec_token.len), exec_token);
+                if (is_executable) reader.toss(exec_token.len);
+
+                try expectToken(reader, .file_contents);
+
+                const size = try reader.takeInt(u64, .little);
+
+                const cur = currents.get(currents.len - 1);
+
+                var file = try cur.dir.createFile(
+                    cur.name_buf[0..cur.last_name_len.?],
+                    .{ .mode = if (is_executable) 0o777 else 0o666 },
+                );
+                defer file.close();
+
+                var fw = file.writer(file_out_buffer);
+                try reader.streamExact64(&fw.interface, size);
+                try fw.interface.flush();
+
+                if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+                    return error.InvalidToken;
+
+                try expectToken(reader, .directory_entry_end);
+
+                continue :state .directory_entry;
+            },
+            .symlink => {
+                expectToken(reader, .symlink) catch unreachable;
+
+                const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
+                    return error.NameTooLarge;
+                switch (size) {
+                    0 => return error.NameTooSmall,
+                    1...std.fs.max_path_bytes => {},
+                    else => return error.NameTooLarge,
+                }
+
+                const cur = currents.get(currents.len - 1);
+                const target = try reader.take(size);
+                if (std.mem.indexOfScalar(u8, target, 0) != null) return error.InvalidToken;
+
+                cur.dir.symLink(target, cur.name_buf[0..cur.last_name_len.?], .{}) catch |e| switch (e) {
+                    error.PathAlreadyExists => {},
+                    else => return e,
+                };
+
+                if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+                    return error.InvalidToken;
+
+                try expectToken(reader, .directory_entry_end);
+
+                continue :state .directory_entry;
+            },
+            .directory => {
+                expectToken(reader, .directory) catch unreachable;
+
+                const cur = currents.get(currents.len - 1);
+
+                const entry_string = getTokenString(.directory_entry);
+
+                const has_children = std.mem.eql(u8, try reader.peek(entry_string.len), entry_string);
+
+                try currents.ensureUnusedCapacity(allocator, 1);
+
+                const child_name = cur.name_buf[0..cur.last_name_len.?];
+
+                cur.dir.makeDir(child_name) catch |e| switch (e) {
+                    error.PathAlreadyExists => {},
+                    else => return e,
+                };
+                if (has_children) {
+                    const child = try cur.dir.openDir(child_name, .{});
+                    currents.appendAssumeCapacity(.{ .dir = child });
+                } else try expectToken(reader, .directory_entry_end);
+                continue :state .directory_entry;
+            },
+            .leave_directory => {
+                if (currents.len == 1)
+                    continue :state .end
+                else {
+                    try expectToken(reader, .directory_entry_end);
+                    var cur = currents.pop().?;
+                    cur.dir.close();
+                    continue :state .directory_entry;
+                }
+            },
+            .end => {
+                try expectToken(reader, .archive_end);
+                return;
+            },
+        }
+        comptime unreachable;
+    }
+
+    /// Reads a Nix archive containing a single file from the reader and writes it to the writer.
+    /// Returns whether the file is executable. This is faster and more memory-efficient than calling
+    /// `fromReader` followed by `dump`.
+    pub fn unpackFileReader(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
+        expectToken(reader, .magic) catch |e| switch (e) {
+            error.InvalidToken => return error.NotANar,
+            error.ReadFailed => return e,
+        };
+
+        try expectToken(reader, .file);
+
+        const exec_token = getTokenString(.executable_file);
+
+        const is_executable = if (std.mem.eql(u8, try reader.peek(exec_token.len), exec_token)) blk: {
+            reader.toss(exec_token.len);
+            break :blk true;
+        } else false;
+
+        try expectToken(reader, .file_contents);
+
+        const size = try reader.takeInt(u64, .little);
+        try reader.streamExact64(writer, size);
+
+        if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+            return error.InvalidToken;
+
+        try expectToken(reader, .archive_end);
+        return is_executable;
+    }
+
+    /// Reads a Nix archive containing a single symlink and returns the target. This is faster and
+    /// more memory-efficient than calling `fromReader`.
+    pub fn unpackSymlinkReader(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
+        expectToken(reader, .magic) catch |e| switch (e) {
+            error.InvalidToken => return error.NotANar,
+            error.ReadFailed => return e,
+        };
+
+        try expectToken(reader, .symlink);
+
+        const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
+            return error.NameTooLarge;
+        switch (size) {
+            0 => return error.NameTooSmall,
+            1...std.fs.max_path_bytes => {},
+            else => return error.NameTooLarge,
+        }
+
+        @memcpy(buffer[0..size], try reader.take(size));
+
+        if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+            return error.InvalidToken;
+
+        try expectToken(reader, .archive_end);
+        return buffer[0..size];
+    }
+
+    /// Pumps the contents of a file in the archive via a reader into the writer without fillowing
+    /// symlinks. Returns whether the file was executable. If you want to follow symlinks, use
+    /// `NixArchive.fromReader` followed by `subPath`. Asserts the reader's buffer contains at least
+    /// `@max(std.fs.max_name_bytes, std.fs.max_path_bytes)` bytes.
+    pub fn unpackSubFileReader(
+        allocator: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        writer: *std.Io.Writer,
+        path: []const u8,
+    ) !bool {
+        std.debug.assert(reader.buffer.len >= @max(std.fs.max_path_bytes, std.fs.max_name_bytes));
+
+        var parts: std.ArrayList([]const u8) = .empty;
+        try parts.ensureTotalCapacity(allocator, 1 + std.mem.count(u8, path, "/"));
+        defer parts.deinit(allocator);
+
+        var names: std.MultiArrayList(struct { name: [std.fs.max_name_bytes]u8, len: Name }) = .empty;
+        try names.ensureTotalCapacity(allocator, 64);
+        defer names.deinit(allocator);
+
+        normalizePath(&parts, path);
+
+        var skip_depth: u64 = 0;
+
+        const State = enum {
+            start,
+            take_file,
+            take_directory,
+            skip_file,
+            skip_symlink,
+            skip_directory,
+            object_type_take,
+            object_type_skip,
+            entry_take,
+            entry_skip,
+            next_take,
+            next_skip,
+        };
+
+        state: switch (State.start) {
+            .start => {
+                expectToken(reader, .magic) catch |e| switch (e) {
+                    error.InvalidToken => return error.NotANar,
+                    else => return e,
+                };
+
+                if (try takeToken(reader, .directory)) {
+                    if (parts.items.len == 0) return error.IsDir;
+                    names.appendAssumeCapacity(.{
+                        .name = undefined,
+                        .len = 0,
+                    });
+                    continue :state .entry_take;
+                } else if (try takeToken(reader, .file))
+                    continue :state if (parts.items.len == 0) .take_file else return error.Symlink
+                else if (try takeToken(reader, .symlink))
+                    return error.IsSymlink;
+                unreachable;
+            },
+            .object_type_skip => {
+                if (try takeToken(reader, .directory))
+                    continue :state .skip_directory
+                else if (try takeToken(reader, .file))
+                    continue :state .skip_file
+                else if (try takeToken(reader, .symlink))
+                    continue :state .skip_symlink
+                else
+                    return error.InvalidToken;
+            },
+            .take_file => {
+                const executable = try takeToken(reader, .executable_file);
+                try expectToken(reader, .file_contents);
+                const len = try reader.takeInt(u64, .little);
+                try reader.streamExact64(writer, len);
+                return executable; // Skip processing the rest of the archive
+            },
+            .take_directory => {
+                if (names.len == parts.items.len) return error.IsDir;
+                names.appendAssumeCapacity(.{
+                    .name = undefined,
+                    .len = 0,
+                });
+                continue :state .entry_take;
+            },
+            .skip_file => {
+                _ = try takeToken(reader, .executable_file);
+                try expectToken(reader, .file_contents);
+                const len = try reader.takeInt(u64, .little);
+                try reader.discardAll64(len);
+
+                if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                    return error.InvalidPadding;
+
+                continue :state if (skip_depth == 0) .next_take else .next_skip;
+            },
+            .skip_symlink => {
+                const len = try reader.takeInt(u64, .little);
+                if (len == 0) return error.TargetTooSmall;
+                if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
+                try reader.discardAll64(len);
+
+                if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                    return error.InvalidPadding;
+
+                continue :state if (skip_depth == 0) .next_take else .next_skip;
+            },
+            .skip_directory => {
+                if (try peekToken(reader, .directory_entry_end))
+                    continue :state if (skip_depth == 0) .next_take else .next_skip;
+
+                skip_depth += 1;
+
+                try names.append(allocator, .{
+                    .name = undefined,
+                    .len = 0,
+                });
+
+                continue :state .entry_skip;
+            },
+            .object_type_take => {
+                if (try takeToken(reader, .directory))
+                    continue :state .take_directory
+                else if (try takeToken(reader, .file))
+                    continue :state .take_file
+                else if (try takeToken(reader, .symlink))
+                    return error.Symlink;
+
+                return error.InvalidToken;
+            },
+            .entry_take => {
+                //std.debug.print("Taking.\n", .{});
+                if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
+                try expectToken(reader, .directory_entry);
+
+                const name = try takeName(reader);
+                //std.debug.print("name = {s}\n", .{name});
+
+                const name_bufs = names.items(.name);
+                const name_lens = names.items(.len);
+                const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
+
+                switch (std.mem.order(u8, prev, name)) {
+                    .lt => {},
+                    .eq => return error.DuplicateObjectName,
+                    .gt => return error.WrongDirectoryOrder,
+                }
+                @memcpy(name_bufs[names.len - 1][0..name.len], name);
+                name_lens[names.len - 1] = @intCast(name.len);
+
+                try expectToken(reader, .directory_entry_inner);
+
+                switch (std.mem.order(u8, name, parts.items[names.len - 1])) {
+                    .lt => continue :state .object_type_skip,
+                    .eq => continue :state .object_type_take,
+                    .gt => return error.NoSuchFile,
+                }
+            },
+            .entry_skip => {
+                //std.debug.print("Skipping.\n", .{});
+                if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
+                try expectToken(reader, .directory_entry);
+
+                const name = try takeName(reader);
+                //std.debug.print("name = {s}, depth = {}\n", .{name, skip_depth});
+
+                const name_bufs = names.items(.name);
+                const name_lens = names.items(.len);
+                const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
+
+                switch (std.mem.order(u8, prev, name)) {
+                    .lt => {},
+                    .eq => return error.DuplicateObjectName,
+                    .gt => return error.WrongDirectoryOrder,
+                }
+                @memcpy(name_bufs[names.len - 1][0..name.len], name);
+                name_lens[names.len - 1] = @intCast(name.len);
+
+                try expectToken(reader, .directory_entry_inner);
+
+                continue :state .object_type_skip;
+            },
+            .next_take => {
+                std.debug.assert(skip_depth == 0);
+                try expectToken(reader, .directory_entry_end);
+                if (try peekToken(reader, .directory_entry_end)) return error.NoSuchFile;
+                continue :state .entry_take;
+            },
+            .next_skip => {
+                std.debug.assert(skip_depth != 0);
+                try expectToken(reader, .directory_entry_end);
+                while (try takeToken(reader, .directory_entry_end)) {
+                    _ = names.pop();
+                    skip_depth -= 1;
+                    if (skip_depth == 0) continue :state .entry_take;
+                }
+                continue :state .entry_skip;
+            },
+        }
+
+        comptime unreachable;
+    }
+
     pub fn deinit(self: *NixArchive) void {
         self.arena.deinit();
         self.* = undefined;
     }
 };
-
-/// Takes a directory and serializes it as a Nix Archive into `writer`. This is faster and more
-/// memory-efficient than calling `fromDirectory` followed by `dump`.
-pub fn dumpDirectory(
-    allocator: std.mem.Allocator,
-    dir: std.fs.Dir,
-    writer: *std.Io.Writer,
-) !void {
-    // Idea: Make a list of nodes sorted by least depth to most depth, followed by names sorted
-    // in reverse. Reading the next node is as easy as popping. `dir_indicies` is to keep track
-    // of where the contents of each directory end.
-
-    var node_names: std.heap.MemoryPoolAligned([std.fs.max_name_bytes]u8, .@"64") = .init(allocator);
-    defer node_names.deinit();
-
-    var nodes: std.MultiArrayList(struct {
-        kind: std.meta.Tag(Object.Data),
-        name: []u8,
-    }) = .empty;
-    defer nodes.deinit(allocator);
-
-    var dirs: std.ArrayList(std.fs.Dir.Iterator) = try .initCapacity(allocator, 1);
-    defer dirs.deinit(allocator);
-    errdefer for (dirs.items[1..]) |*d| d.dir.close();
-
-    var dir_indicies: std.ArrayList(usize) = .empty;
-    defer dir_indicies.deinit(allocator);
-
-    dirs.appendAssumeCapacity(dir.iterate());
-
-    const Scan = enum { scan_directory, print };
-
-    try writeTokens(writer, &.{ .magic, .directory });
-
-    loop: switch (Scan.scan_directory) {
-        .scan_directory => {
-            try dir_indicies.append(allocator, nodes.len);
-            var last_iter = &dirs.items[dirs.items.len - 1];
-            while (try last_iter.next()) |entry| {
-                try nodes.append(allocator, .{
-                    .name = blk: {
-                        var name = try node_names.create();
-                        @memcpy(name[0..entry.name.len], entry.name);
-                        break :blk name[0..entry.name.len];
-                    },
-                    .kind = switch (entry.kind) {
-                        .sym_link => .symlink,
-                        .directory => .directory,
-                        else => .file,
-                    },
-                });
-            }
-            nodes.sortSpanUnstable(dir_indicies.getLast(), nodes.len, struct {
-                names: []const []const u8,
-
-                pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
-                    return std.mem.order(
-                        u8,
-                        ctx.names[a],
-                        ctx.names[b],
-                    ) == .gt;
-                }
-            }{ .names = nodes.items(.name) });
-            continue :loop .print;
-        },
-        .print => {
-            while (nodes.len > dir_indicies.getLast() and nodes.len > 0) {
-                const cur = nodes.pop().?;
-                const name = cur.name;
-                defer node_names.destroy(@ptrCast(@alignCast(name)));
-
-                try writeTokens(writer, &.{.directory_entry});
-                try writeStr(writer, name);
-                try writeTokens(writer, &.{.directory_entry_inner});
-                switch (cur.kind) {
-                    .directory => {
-                        try writeTokens(writer, &.{.directory});
-                        try dirs.ensureUnusedCapacity(allocator, 1);
-                        const d = try dirs.getLast().dir.openDir(name, .{ .iterate = true });
-                        dirs.appendAssumeCapacity(d.iterateAssumeFirstIteration());
-                        continue :loop .scan_directory;
-                    },
-                    .file => {
-                        try writeTokens(writer, &.{.file});
-                        var file = try dirs.getLast().dir.openFile(name, .{});
-                        defer file.close();
-                        if (try file.mode() & 0o111 != 0)
-                            try writeTokens(writer, &.{.executable_file});
-                        try writeTokens(writer, &.{.file_contents});
-
-                        var fr = file.reader(&.{});
-
-                        if (fr.getSize()) |size| {
-                            try writer.writeInt(u64, size, .little);
-                            var left = size;
-                            while (left != 0) {
-                                const read = try writer.sendFileAll(&fr, .limited64(size));
-                                left -= read;
-                                if (read == 0 and left != 0) return error.EndOfStream;
-                            }
-                            try writePadding(writer, size);
-                        } else |_| {
-                            @branchHint(.unlikely);
-                            var aw: std.Io.Writer.Allocating = .init(allocator);
-                            defer aw.deinit();
-
-                            try aw.ensureUnusedCapacity(fr.interface.buffer.len);
-
-                            while (try aw.writer.sendFileAll(&fr, .unlimited) != 0) {}
-                            const size = aw.writer.buffered().len;
-                            try writer.writeInt(u64, size, .little);
-                            try writer.writeAll(aw.writer.buffered());
-                            try writePadding(writer, size);
-                        }
-                    },
-                    .symlink => {
-                        try writeTokens(writer, &.{.symlink});
-                        var buf: [std.fs.max_path_bytes]u8 = undefined;
-                        const link = dirs.getLast().dir.readLink(name, &buf) catch |e|
-                            switch (e) {
-                                error.NameTooLong => unreachable,
-                                else => return e,
-                            };
-                        try writeStr(writer, link);
-                    },
-                }
-
-                try writeTokens(writer, &.{.directory_entry_end});
-            } else {
-                if (dirs.items.len == 1) break :loop;
-                try writeTokens(writer, &.{.directory_entry_end});
-                _ = dir_indicies.pop().?;
-                var d = dirs.pop().?;
-                d.dir.close();
-                continue :loop .print;
-            }
-        },
-    }
-
-    try writeTokens(writer, &.{.archive_end});
-}
-
-/// Takes a reader and serializes its contents as a Nix Archive of a file into `writer`. This is
-/// faster and more memory-efficient than calling `fromFileContents` followed by `dump`.
-pub fn dumpFile(allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, executable: bool, size: ?u64) !void {
-    try writeTokens(writer, &.{ .magic, .file });
-    if (executable) try writeTokens(writer, &.{.executable_file});
-    try writeTokens(writer, &.{.file_contents});
-
-    const sz = blk: {
-        if (size) |s| {
-            try writer.writeInt(u64, s, .little);
-
-            try reader.streamExact64(writer, s);
-
-            break :blk s;
-        } else {
-            var aw = std.Io.Writer.Allocating.init(allocator);
-            defer aw.deinit();
-
-            try aw.ensureUnusedCapacity(reader.buffer.len);
-
-            const s = s: {
-                var total: u64 = 0;
-                var read = try reader.streamRemaining(&aw.writer);
-                while (read != 0) {
-                    total += read;
-                    read = try reader.streamRemaining(&aw.writer);
-                }
-                break :s total;
-            };
-            try writer.writeInt(u64, s, .little);
-            try writer.writeAll(aw.written());
-            break :blk s;
-        }
-    };
-    try writePadding(writer, sz);
-
-    try writeTokens(writer, &.{.archive_end});
-}
-
-pub fn dumpSymlink(target: []const u8, writer: *std.Io.Writer) !void {
-    try writeTokens(writer, &.{ .magic, .symlink });
-    try writeStr(writer, target);
-    try writeTokens(writer, &.{.archive_end});
-}
-
-pub fn unpackDirDirect(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    out_dir: std.fs.Dir,
-    file_out_buffer: []u8,
-) !void {
-    std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
-
-    var currents: std.MultiArrayList(struct {
-        name_buf: [std.fs.max_name_bytes]u8 = undefined,
-        last_name_len: ?Name = null,
-        dir: std.fs.Dir,
-    }) = .empty;
-    defer currents.deinit(allocator);
-
-    defer if (currents.len > 1) for (currents.items(.dir)[1..]) |*d| d.close();
-
-    try currents.append(allocator, .{ .dir = out_dir });
-
-    const State = enum { directory_entry, directory, file, symlink, end, leave_directory };
-
-    expectToken(reader, .magic) catch |e| switch (e) {
-        error.InvalidToken => return error.NotANar,
-        error.ReadFailed => return error.ReadFailed,
-    };
-
-    expectToken(reader, .directory) catch |e| switch (e) {
-        error.InvalidToken => return error.WrongArchiveType,
-        error.ReadFailed => return error.ReadFailed,
-    };
-
-    state: switch (State.directory_entry) {
-        .directory_entry => {
-            expectToken(reader, .directory_entry) catch |e| switch (e) {
-                error.InvalidToken => continue :state .leave_directory,
-                else => return e,
-            };
-
-            const name = try takeName(reader);
-
-            if (std.mem.indexOfScalar(u8, name, 0) != null or
-                std.mem.indexOfScalar(u8, name, '/') != null or
-                std.mem.eql(u8, name, ".") or
-                std.mem.eql(u8, name, ".."))
-            {
-                return error.MaliciousArchive;
-            }
-
-            const cur = currents.get(currents.len - 1);
-            if (cur.last_name_len) |l| switch (std.mem.order(u8, cur.name_buf[0..l], name)) {
-                .lt => {},
-                .eq => return error.DuplicateObjectName,
-                .gt => {
-                    return error.WrongDirectoryOrder;
-                },
-            };
-
-            @memcpy(currents.items(.name_buf)[currents.len - 1][0..name.len], name);
-
-            currents.items(.last_name_len)[currents.len - 1] = @intCast(name.len);
-
-            try expectToken(reader, .directory_entry_inner);
-
-            const file_string = getTokenString(.file);
-            const directory_string = getTokenString(.directory);
-            const symlink_string = getTokenString(.symlink);
-            if (std.mem.eql(u8, file_string, try reader.peek(file_string.len)))
-                continue :state .file
-            else if (std.mem.eql(u8, directory_string, try reader.peek(directory_string.len)))
-                continue :state .directory
-            else if (std.mem.eql(u8, symlink_string, try reader.peek(symlink_string.len)))
-                continue :state .symlink
-            else
-                return error.InvalidToken;
-        },
-        .file => {
-            expectToken(reader, .file) catch unreachable;
-            const exec_token = getTokenString(.executable_file);
-            const is_executable = std.mem.eql(u8, try reader.peek(exec_token.len), exec_token);
-            if (is_executable) reader.toss(exec_token.len);
-
-            try expectToken(reader, .file_contents);
-
-            const size = try reader.takeInt(u64, .little);
-
-            const cur = currents.get(currents.len - 1);
-
-            var file = try cur.dir.createFile(
-                cur.name_buf[0..cur.last_name_len.?],
-                .{ .mode = if (is_executable) 0o777 else 0o666 },
-            );
-            defer file.close();
-
-            var fw = file.writer(file_out_buffer);
-            try reader.streamExact64(&fw.interface, size);
-            try fw.interface.flush();
-
-            if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-                return error.InvalidToken;
-
-            try expectToken(reader, .directory_entry_end);
-
-            continue :state .directory_entry;
-        },
-        .symlink => {
-            expectToken(reader, .symlink) catch unreachable;
-
-            const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
-                return error.NameTooLarge;
-            switch (size) {
-                0 => return error.NameTooSmall,
-                1...std.fs.max_path_bytes => {},
-                else => return error.NameTooLarge,
-            }
-
-            const cur = currents.get(currents.len - 1);
-            const target = try reader.take(size);
-            if (std.mem.indexOfScalar(u8, target, 0) != null) return error.InvalidToken;
-
-            cur.dir.symLink(target, cur.name_buf[0..cur.last_name_len.?], .{}) catch |e| switch (e) {
-                error.PathAlreadyExists => {},
-                else => return e,
-            };
-
-            if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-                return error.InvalidToken;
-
-            try expectToken(reader, .directory_entry_end);
-
-            continue :state .directory_entry;
-        },
-        .directory => {
-            expectToken(reader, .directory) catch unreachable;
-
-            const cur = currents.get(currents.len - 1);
-
-            const entry_string = getTokenString(.directory_entry);
-
-            const has_children = std.mem.eql(u8, try reader.peek(entry_string.len), entry_string);
-
-            try currents.ensureUnusedCapacity(allocator, 1);
-
-            const child_name = cur.name_buf[0..cur.last_name_len.?];
-
-            cur.dir.makeDir(child_name) catch |e| switch (e) {
-                error.PathAlreadyExists => {},
-                else => return e,
-            };
-            if (has_children) {
-                const child = try cur.dir.openDir(child_name, .{});
-                currents.appendAssumeCapacity(.{ .dir = child });
-            } else try expectToken(reader, .directory_entry_end);
-            continue :state .directory_entry;
-        },
-        .leave_directory => {
-            if (currents.len == 1)
-                continue :state .end
-            else {
-                try expectToken(reader, .directory_entry_end);
-                var cur = currents.pop().?;
-                cur.dir.close();
-                continue :state .directory_entry;
-            }
-        },
-        .end => {
-            try expectToken(reader, .archive_end);
-            return;
-        },
-    }
-    comptime unreachable;
-}
-
-/// Reads a Nix archive containing a single file from the reader and writes it to the writer.
-/// Returns whether the file is executable. This is faster and more memory-efficient than calling
-/// `fromReader` followed by `dump`.
-pub fn unpackFileDirect(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
-    expectToken(reader, .magic) catch |e| switch (e) {
-        error.InvalidToken => return error.NotANar,
-        error.ReadFailed => return e,
-    };
-
-    try expectToken(reader, .file);
-
-    const exec_token = getTokenString(.executable_file);
-
-    const is_executable = if (std.mem.eql(u8, try reader.peek(exec_token.len), exec_token)) blk: {
-        reader.toss(exec_token.len);
-        break :blk true;
-    } else false;
-
-    try expectToken(reader, .file_contents);
-
-    const size = try reader.takeInt(u64, .little);
-    try reader.streamExact64(writer, size);
-
-    if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-        return error.InvalidToken;
-
-    try expectToken(reader, .archive_end);
-    return is_executable;
-}
-
-/// Reads a Nix archive containing a single symlink and returns the target. This is faster and
-/// more memory-efficient than calling `fromReader`.
-pub fn unpackSymlinkDirect(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
-    expectToken(reader, .magic) catch |e| switch (e) {
-        error.InvalidToken => return error.NotANar,
-        error.ReadFailed => return e,
-    };
-
-    try expectToken(reader, .symlink);
-
-    const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
-        return error.NameTooLarge;
-    switch (size) {
-        0 => return error.NameTooSmall,
-        1...std.fs.max_path_bytes => {},
-        else => return error.NameTooLarge,
-    }
-
-    @memcpy(buffer[0..size], try reader.take(size));
-
-    if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-        return error.InvalidToken;
-
-    try expectToken(reader, .archive_end);
-    return buffer[0..size];
-}
-
 /// Returns the type of archive in the reader. Asserts the reader buffer is at least 80 bytes.
 pub fn archiveType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
     const magic = getTokenString(.magic);
@@ -1025,208 +1232,6 @@ pub const Object = struct {
         return cur;
     }
 };
-
-/// Pumps the contents of a file in the archive via a reader into the writer without fillowing
-/// symlinks. Returns whether the file was executable. THis is faster and more memory-efficient
-/// than calling `fromReader` followed by `subPath`. Asserts the reader's buffer contains at least
-/// `@max(std.fs.max_name_bytes, std.fs.max_path_bytes)` bytes.
-pub fn fileContentsNoFollow(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    path: []const u8,
-) !bool {
-    std.debug.assert(reader.buffer.len >= @max(std.fs.max_path_bytes, std.fs.max_name_bytes));
-
-    var parts: std.ArrayList([]const u8) = .empty;
-    try parts.ensureTotalCapacity(allocator, 1 + std.mem.count(u8, path, "/"));
-    defer parts.deinit(allocator);
-
-    var names: std.MultiArrayList(struct { name: [std.fs.max_name_bytes]u8, len: Name }) = .empty;
-    try names.ensureTotalCapacity(allocator, 64);
-    defer names.deinit(allocator);
-
-    normalizePath(&parts, path);
-
-    var skip_depth: u64 = 0;
-
-    const State = enum {
-        start,
-        take_file,
-        take_directory,
-        skip_file,
-        skip_symlink,
-        skip_directory,
-        object_type_take,
-        object_type_skip,
-        entry_take,
-        entry_skip,
-        next_take,
-        next_skip,
-    };
-
-    state: switch (State.start) {
-        .start => {
-            expectToken(reader, .magic) catch |e| switch (e) {
-                error.InvalidToken => return error.NotANar,
-                else => return e,
-            };
-
-            if (try takeToken(reader, .directory)) {
-                if (parts.items.len == 0) return error.IsDir;
-                names.appendAssumeCapacity(.{
-                    .name = undefined,
-                    .len = 0,
-                });
-                continue :state .entry_take;
-            } else if (try takeToken(reader, .file))
-                continue :state if (parts.items.len == 0) .take_file else return error.Symlink
-            else if (try takeToken(reader, .symlink))
-                return error.IsSymlink;
-            unreachable;
-        },
-        .object_type_skip => {
-            if (try takeToken(reader, .directory))
-                continue :state .skip_directory
-            else if (try takeToken(reader, .file))
-                continue :state .skip_file
-            else if (try takeToken(reader, .symlink))
-                continue :state .skip_symlink
-            else
-                return error.InvalidToken;
-        },
-        .take_file => {
-            const executable = try takeToken(reader, .executable_file);
-            try expectToken(reader, .file_contents);
-            const len = try reader.takeInt(u64, .little);
-            try reader.streamExact64(writer, len);
-            return executable; // Skip processing the rest of the archive
-        },
-        .take_directory => {
-            if (names.len == parts.items.len) return error.IsDir;
-            names.appendAssumeCapacity(.{
-                .name = undefined,
-                .len = 0,
-            });
-            continue :state .entry_take;
-        },
-        .skip_file => {
-            _ = try takeToken(reader, .executable_file);
-            try expectToken(reader, .file_contents);
-            const len = try reader.takeInt(u64, .little);
-            try reader.discardAll64(len);
-
-            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
-                return error.InvalidPadding;
-
-            continue :state if (skip_depth == 0) .next_take else .next_skip;
-        },
-        .skip_symlink => {
-            const len = try reader.takeInt(u64, .little);
-            if (len == 0) return error.TargetTooSmall;
-            if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
-            try reader.discardAll64(len);
-
-            if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
-                return error.InvalidPadding;
-
-            continue :state if (skip_depth == 0) .next_take else .next_skip;
-        },
-        .skip_directory => {
-            if (try peekToken(reader, .directory_entry_end))
-                continue :state if (skip_depth == 0) .next_take else .next_skip;
-
-            skip_depth += 1;
-
-            try names.append(allocator, .{
-                .name = undefined,
-                .len = 0,
-            });
-
-            continue :state .entry_skip;
-        },
-        .object_type_take => {
-            if (try takeToken(reader, .directory))
-                continue :state .take_directory
-            else if (try takeToken(reader, .file))
-                continue :state .take_file
-            else if (try takeToken(reader, .symlink))
-                return error.Symlink;
-
-            return error.InvalidToken;
-        },
-        .entry_take => {
-            //std.debug.print("Taking.\n", .{});
-            if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
-            try expectToken(reader, .directory_entry);
-
-            const name = try takeName(reader);
-            //std.debug.print("name = {s}\n", .{name});
-
-            const name_bufs = names.items(.name);
-            const name_lens = names.items(.len);
-            const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
-
-            switch (std.mem.order(u8, prev, name)) {
-                .lt => {},
-                .eq => return error.DuplicateObjectName,
-                .gt => return error.WrongDirectoryOrder,
-            }
-            @memcpy(name_bufs[names.len - 1][0..name.len], name);
-            name_lens[names.len - 1] = @intCast(name.len);
-
-            try expectToken(reader, .directory_entry_inner);
-
-            switch (std.mem.order(u8, name, parts.items[names.len - 1])) {
-                .lt => continue :state .object_type_skip,
-                .eq => continue :state .object_type_take,
-                .gt => return error.NoSuchFile,
-            }
-        },
-        .entry_skip => {
-            //std.debug.print("Skipping.\n", .{});
-            if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
-            try expectToken(reader, .directory_entry);
-
-            const name = try takeName(reader);
-            //std.debug.print("name = {s}, depth = {}\n", .{name, skip_depth});
-
-            const name_bufs = names.items(.name);
-            const name_lens = names.items(.len);
-            const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
-
-            switch (std.mem.order(u8, prev, name)) {
-                .lt => {},
-                .eq => return error.DuplicateObjectName,
-                .gt => return error.WrongDirectoryOrder,
-            }
-            @memcpy(name_bufs[names.len - 1][0..name.len], name);
-            name_lens[names.len - 1] = @intCast(name.len);
-
-            try expectToken(reader, .directory_entry_inner);
-
-            continue :state .object_type_skip;
-        },
-        .next_take => {
-            std.debug.assert(skip_depth == 0);
-            try expectToken(reader, .directory_entry_end);
-            if (try peekToken(reader, .directory_entry_end)) return error.NoSuchFile;
-            continue :state .entry_take;
-        },
-        .next_skip => {
-            std.debug.assert(skip_depth != 0);
-            try expectToken(reader, .directory_entry_end);
-            while (try takeToken(reader, .directory_entry_end)) {
-                _ = names.pop();
-                skip_depth -= 1;
-                if (skip_depth == 0) continue :state .entry_take;
-            }
-            continue :state .entry_skip;
-        },
-    }
-
-    comptime unreachable;
-}
 
 /// The array list must reserve at least `1 + std.mem.count(u8, path, "/")` items
 fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
@@ -1519,7 +1524,7 @@ test "more complex" {
     const writer = &fixed;
 
     {
-        try dumpDirectory(allocator, root, writer);
+        try NixArchive.dumpDirectory(allocator, root, writer);
 
         var archive = try NixArchive.fromDirectory(allocator, root);
         defer archive.deinit();
@@ -1539,7 +1544,7 @@ test "more complex" {
         var empty = try root.openDir("empty", .{ .iterate = true });
         defer empty.close();
 
-        try dumpDirectory(allocator, empty, writer);
+        try NixArchive.dumpDirectory(allocator, empty, writer);
 
         var archive = try NixArchive.fromDirectory(allocator, empty);
         defer archive.deinit();
