@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .strip = strip,
             .single_threaded = true,
-            .imports = &.{.{ .name = "narser", .module = narser }},
+            .imports = &.{.{ .name = "lib", .module = narser }},
         }),
     });
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const narser = @import("narser");
+const narser = @import("lib");
 
 const fatal = std.process.fatal;
 
