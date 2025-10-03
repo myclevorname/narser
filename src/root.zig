@@ -20,6 +20,162 @@ pub const NixArchive = struct {
     root: *Object,
     name_pool: std.heap.MemoryPool([std.fs.max_name_bytes]u8),
 
+    pub const Object = struct {
+        /// null iff the root of the archive
+        entry: ?DirectoryEntry,
+        data: Data,
+
+        pub const DirectoryEntry = struct {
+            parent: *Object,
+            prev: ?*Object = null,
+            next: ?*Object = null,
+            name: []u8,
+        };
+
+        pub const Data = union(enum) {
+            file: File,
+            symlink: []u8,
+            directory: ?*Object,
+        };
+
+        pub const File = struct {
+            is_executable: bool,
+            contents: []u8,
+        };
+
+        /// Makes the child a child of the parent object. Asserts the object is a directory.
+        /// This only fails if a child with the same name already exists.
+        pub fn insertChild(parent: *Object, child: *Object) error{DuplicateObjectName}!void {
+            std.debug.assert(parent.data == .directory);
+            if (parent.data.directory) |first|
+                switch (std.mem.order(u8, first.entry.?.name, child.entry.?.name)) {
+                    .lt => {
+                        var left = first;
+                        while (left.entry.?.next != null and
+                            std.mem.order(u8, left.entry.?.name, child.entry.?.name) == .lt)
+                        {
+                            left = left.entry.?.next.?;
+                        } else switch (std.mem.order(u8, left.entry.?.name, child.entry.?.name)) {
+                            .eq => return error.DuplicateObjectName,
+                            .lt => {
+                                left.entry.?.next = child;
+                                child.entry.?.prev = left;
+                            },
+                            .gt => {
+                                child.entry.?.prev = left.entry.?.prev;
+                                child.entry.?.next = left;
+                                if (left.entry.?.prev) |p| p.entry.?.next = child;
+                                left.entry.?.prev = child;
+                            },
+                        }
+                    },
+                    .eq => return error.DuplicateObjectName,
+                    .gt => {
+                        first.entry.?.prev = child;
+                        child.entry.?.next = first;
+                        parent.data.directory = child;
+                    },
+                }
+            else
+                parent.data.directory = child;
+        }
+
+        /// Traverses an Object, following symbolic links.
+        pub fn subPath(self: *Object, subpath: []const u8) !*Object {
+            var cur = self;
+            var parts_buf: [4096][]const u8 = undefined;
+            var parts: std.ArrayList([]const u8) = .initBuffer(&parts_buf);
+            if (self.entry != null and self.data == .symlink)
+                if (self.data.symlink[0] == '/')
+                    return error.PathOutsideArchive
+                else
+                    parts.appendAssumeCapacity(self.data.symlink);
+
+            parts.appendAssumeCapacity(subpath);
+
+            var limit: u16 = 0;
+
+            comptime std.debug.assert(std.fs.path.sep == '/');
+            while (parts.pop()) |full_first_path| {
+                limit = std.math.add(u16, limit, 1) catch return error.NestedTooDeep;
+                const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
+                const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
+                const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
+                if (first_part_len != null) parts.appendAssumeCapacity(rest);
+
+                //std.debug.print("{s} {}\n", .{ full_first_path, parts.items.len });
+                if (cur.data == .symlink and cur.entry != null) {
+                    parts.appendBounded(cur.data.symlink) catch return error.NestedTooDeep;
+                    cur = if (cur.entry) |e| e.parent else cur;
+                    continue;
+                }
+
+                if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
+                if (std.mem.eql(u8, first, "..")) {
+                    if (cur.entry) |entry| cur = entry.parent;
+                    continue;
+                }
+
+                cur = if (cur.data == .directory)
+                    cur.data.directory orelse
+                        return error.FileNotFound
+                else
+                    return error.NotDir;
+                find: while (true) {
+                    switch (std.mem.order(u8, cur.entry.?.name, first)) {
+                        .lt => {},
+                        .eq => break :find,
+                        .gt => return error.FileNotFound,
+                    }
+                    cur = cur.entry.?.next orelse
+                        return error.FileNotFound;
+                }
+                switch (cur.data) {
+                    .directory => {},
+                    .file => if (parts.items.len != 0) return error.NotDir,
+                    .symlink => |target| {
+                        if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
+                    },
+                }
+            }
+            return cur;
+        }
+    };
+
+    /// Returns the type of archive in the reader. Asserts the reader buffer is at least 80 bytes.
+    pub fn peekType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
+        const magic = getTokenString(.magic);
+        const file = getTokenString(.file);
+        const directory = getTokenString(.directory);
+        const symlink = getTokenString(.symlink);
+
+        if (magic.len + directory.len != 80) {
+            @compileLog(magic.len + directory.len);
+            @compileError("archiveType doc comment needs updated");
+        }
+
+        std.debug.assert(reader.buffer.len >= magic.len + directory.len);
+
+        if (!std.mem.eql(u8, try reader.peek(magic.len), magic)) return error.NotANar;
+
+        if (std.mem.eql(u8, try reader.peek(magic.len + file.len), magic ++ file))
+            return .file
+        else if (std.mem.eql(
+            u8,
+            try reader.peek(magic.len + directory.len),
+            magic ++ directory,
+        ))
+            return .directory
+        else if (std.mem.eql(
+            u8,
+            try reader.peek(magic.len + symlink.len),
+            magic ++ symlink,
+        ))
+            return .symlink
+        else
+            return error.InvalidToken;
+    }
+
     pub const FromReaderOptions = struct {
         /// The length of each file is always stored
         store_file_contents: bool = true,
@@ -349,7 +505,7 @@ pub const NixArchive = struct {
     }
 
     /// Serialize a NixArchive into the writer.
-    pub fn dump(self: NixArchive, writer: *std.Io.Writer) !void {
+    pub fn toWriter(self: NixArchive, writer: *std.Io.Writer) !void {
         var node = self.root;
 
         try writeTokens(writer, &.{.magic});
@@ -390,7 +546,7 @@ pub const NixArchive = struct {
     }
 
     /// Unpacks a Nix archive into a directory.
-    pub fn unpackDirectory(self: NixArchive, target_dir: std.fs.Dir) !void {
+    pub fn toDirectory(self: NixArchive, target_dir: std.fs.Dir) !void {
         if (self.root.data.directory == null) return;
 
         var item_buf: [256]std.fs.Dir = undefined;
@@ -450,8 +606,8 @@ pub const NixArchive = struct {
     }
 
     /// Takes a directory and serializes it as a Nix Archive into `writer`. This is faster and more
-    /// memory-efficient than calling `fromDirectory` followed by `dump`.
-    pub fn dumpDirectory(
+    /// memory-efficient than calling `fromDirectory` followed by `pack`.
+    pub fn packDirectory(
         allocator: std.mem.Allocator,
         dir: std.fs.Dir,
         writer: *std.Io.Writer,
@@ -591,8 +747,8 @@ pub const NixArchive = struct {
     }
 
     /// Takes a reader and serializes its contents as a Nix Archive of a file into `writer`. This is
-    /// faster and more memory-efficient than calling `fromFileContents` followed by `dump`.
-    pub fn dumpFile(
+    /// faster and more memory-efficient than calling `fromFileContents` followed by `pack`.
+    pub fn packFile(
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
@@ -635,13 +791,13 @@ pub const NixArchive = struct {
         try writeTokens(writer, &.{.archive_end});
     }
 
-    pub fn dumpSymlink(target: []const u8, writer: *std.Io.Writer) !void {
+    pub fn packSymlink(target: []const u8, writer: *std.Io.Writer) !void {
         try writeTokens(writer, &.{ .magic, .symlink });
         try writeStr(writer, target);
         try writeTokens(writer, &.{.archive_end});
     }
 
-    pub fn unpackDirectoryReader(
+    pub fn unpackDirectory(
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
         out_dir: std.fs.Dir,
@@ -815,8 +971,8 @@ pub const NixArchive = struct {
 
     /// Reads a Nix archive containing a single file from the reader and writes it to the writer.
     /// Returns whether the file is executable. This is faster and more memory-efficient than calling
-    /// `fromReader` followed by `dump`.
-    pub fn unpackFileReader(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
+    /// `fromReader` followed by `pack`.
+    pub fn unpackFile(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
         expectToken(reader, .magic) catch |e| switch (e) {
             error.InvalidToken => return error.NotANar,
             error.ReadFailed => return e,
@@ -845,7 +1001,7 @@ pub const NixArchive = struct {
 
     /// Reads a Nix archive containing a single symlink and returns the target. This is faster and
     /// more memory-efficient than calling `fromReader`.
-    pub fn unpackSymlinkReader(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
+    pub fn unpackSymlink(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
         expectToken(reader, .magic) catch |e| switch (e) {
             error.InvalidToken => return error.NotANar,
             error.ReadFailed => return e,
@@ -874,7 +1030,7 @@ pub const NixArchive = struct {
     /// symlinks. Returns whether the file was executable. If you want to follow symlinks, use
     /// `NixArchive.fromReader` followed by `subPath`. Asserts the reader's buffer contains at least
     /// `@max(std.fs.max_name_bytes, std.fs.max_path_bytes)` bytes.
-    pub fn unpackSubFileReader(
+    pub fn unpackSubFile(
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
@@ -1075,161 +1231,6 @@ pub const NixArchive = struct {
     pub fn deinit(self: *NixArchive) void {
         self.arena.deinit();
         self.* = undefined;
-    }
-};
-/// Returns the type of archive in the reader. Asserts the reader buffer is at least 80 bytes.
-pub fn archiveType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
-    const magic = getTokenString(.magic);
-    const file = getTokenString(.file);
-    const directory = getTokenString(.directory);
-    const symlink = getTokenString(.symlink);
-
-    if (magic.len + directory.len != 80) {
-        @compileLog(magic.len + directory.len);
-        @compileError("archiveType doc comment needs updated");
-    }
-
-    std.debug.assert(reader.buffer.len >= magic.len + directory.len);
-
-    if (!std.mem.eql(u8, try reader.peek(magic.len), magic)) return error.NotANar;
-
-    if (std.mem.eql(u8, try reader.peek(magic.len + file.len), magic ++ file))
-        return .file
-    else if (std.mem.eql(
-        u8,
-        try reader.peek(magic.len + directory.len),
-        magic ++ directory,
-    ))
-        return .directory
-    else if (std.mem.eql(
-        u8,
-        try reader.peek(magic.len + symlink.len),
-        magic ++ symlink,
-    ))
-        return .symlink
-    else
-        return error.InvalidToken;
-}
-
-pub const Object = struct {
-    /// null iff the root of the archive
-    entry: ?DirectoryEntry,
-    data: Data,
-
-    pub const DirectoryEntry = struct {
-        parent: *Object,
-        prev: ?*Object = null,
-        next: ?*Object = null,
-        name: []u8,
-    };
-
-    pub const Data = union(enum) {
-        file: File,
-        symlink: []u8,
-        directory: ?*Object,
-    };
-
-    pub const File = struct {
-        is_executable: bool,
-        contents: []u8,
-    };
-
-    /// Makes the child a child of the parent object. Asserts the object is a directory.
-    /// This only fails if a child with the same name already exists.
-    pub fn insertChild(parent: *Object, child: *Object) error{DuplicateObjectName}!void {
-        std.debug.assert(parent.data == .directory);
-        if (parent.data.directory) |first|
-            switch (std.mem.order(u8, first.entry.?.name, child.entry.?.name)) {
-                .lt => {
-                    var left = first;
-                    while (left.entry.?.next != null and
-                        std.mem.order(u8, left.entry.?.name, child.entry.?.name) == .lt)
-                    {
-                        left = left.entry.?.next.?;
-                    } else switch (std.mem.order(u8, left.entry.?.name, child.entry.?.name)) {
-                        .eq => return error.DuplicateObjectName,
-                        .lt => {
-                            left.entry.?.next = child;
-                            child.entry.?.prev = left;
-                        },
-                        .gt => {
-                            child.entry.?.prev = left.entry.?.prev;
-                            child.entry.?.next = left;
-                            if (left.entry.?.prev) |p| p.entry.?.next = child;
-                            left.entry.?.prev = child;
-                        },
-                    }
-                },
-                .eq => return error.DuplicateObjectName,
-                .gt => {
-                    first.entry.?.prev = child;
-                    child.entry.?.next = first;
-                    parent.data.directory = child;
-                },
-            }
-        else
-            parent.data.directory = child;
-    }
-
-    /// Traverses an Object, following symbolic links.
-    pub fn subPath(self: *Object, subpath: []const u8) !*Object {
-        var cur = self;
-        var parts_buf: [4096][]const u8 = undefined;
-        var parts: std.ArrayList([]const u8) = .initBuffer(&parts_buf);
-        if (self.entry != null and self.data == .symlink)
-            if (self.data.symlink[0] == '/')
-                return error.PathOutsideArchive
-            else
-                parts.appendAssumeCapacity(self.data.symlink);
-
-        parts.appendAssumeCapacity(subpath);
-
-        var limit: u16 = 0;
-
-        comptime std.debug.assert(std.fs.path.sep == '/');
-        while (parts.pop()) |full_first_path| {
-            limit = std.math.add(u16, limit, 1) catch return error.NestedTooDeep;
-            const first_part_len = std.mem.indexOfScalar(u8, full_first_path, '/');
-            const first = if (first_part_len) |len| full_first_path[0..len] else full_first_path;
-            const rest = if (first_part_len) |len| full_first_path[len + 1 ..] else "";
-            if (first_part_len != null) parts.appendAssumeCapacity(rest);
-
-            //std.debug.print("{s} {}\n", .{ full_first_path, parts.items.len });
-            if (cur.data == .symlink and cur.entry != null) {
-                parts.appendBounded(cur.data.symlink) catch return error.NestedTooDeep;
-                cur = if (cur.entry) |e| e.parent else cur;
-                continue;
-            }
-
-            if (std.mem.eql(u8, first, ".") or first.len == 0) continue;
-            if (std.mem.eql(u8, first, "..")) {
-                if (cur.entry) |entry| cur = entry.parent;
-                continue;
-            }
-
-            cur = if (cur.data == .directory)
-                cur.data.directory orelse
-                    return error.FileNotFound
-            else
-                return error.NotDir;
-            find: while (true) {
-                switch (std.mem.order(u8, cur.entry.?.name, first)) {
-                    .lt => {},
-                    .eq => break :find,
-                    .gt => return error.FileNotFound,
-                }
-                cur = cur.entry.?.next orelse
-                    return error.FileNotFound;
-            }
-            switch (cur.data) {
-                .directory => {},
-                .file => if (parts.items.len != 0) return error.NotDir,
-                .symlink => |target| {
-                    if (std.mem.startsWith(u8, target, "/")) return error.PathOutsideArchive;
-                },
-            }
-        }
-        return cur;
     }
 };
 
@@ -1503,7 +1504,7 @@ test "nar to directory to nar" {
 
     var writer: std.Io.Writer = .fixed(&buffer);
 
-    try data.dump(&writer);
+    try data.toWriter(&writer);
 
     try std.testing.expectEqualSlices(u8, expected, writer.buffered());
 }
@@ -1524,12 +1525,12 @@ test "more complex" {
     const writer = &fixed;
 
     {
-        try NixArchive.dumpDirectory(allocator, root, writer);
+        try NixArchive.packDirectory(allocator, root, writer);
 
         var archive = try NixArchive.fromDirectory(allocator, root);
         defer archive.deinit();
 
-        try archive.dump(writer);
+        try archive.toWriter(writer);
 
         const contents: []u8 = @constCast(@embedFile("tests/complex.nar"));
 
@@ -1538,20 +1539,20 @@ test "more complex" {
         var other_archive = try NixArchive.fromReader(allocator, &reader, .{});
         defer other_archive.deinit();
 
-        try other_archive.dump(writer);
+        try other_archive.toWriter(writer);
     }
     {
         var empty = try root.openDir("empty", .{ .iterate = true });
         defer empty.close();
 
-        try NixArchive.dumpDirectory(allocator, empty, writer);
+        try NixArchive.packDirectory(allocator, empty, writer);
 
         var archive = try NixArchive.fromDirectory(allocator, empty);
         defer archive.deinit();
 
-        try archive.dump(writer);
+        try archive.toWriter(writer);
     }
 
-    // TODO: Add more dumps and froms
+    // TODO: Add more packs and froms
     try std.testing.expectEqualSlices(u8, expected, writer.buffered());
 }
