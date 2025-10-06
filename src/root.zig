@@ -663,7 +663,12 @@ pub const NixArchive = struct {
                         },
                     });
                 }
-                nodes.sortSpanUnstable(dir_indicies.getLast(), nodes.len, struct {
+                // TODO: Change to sortSpanUnstable when 0.15.2 or 0.16.0 releases.
+                // Using a stable sort is a workaround for Zig #25250 as I encounter
+                // a bug where copying a copy of the Linux kernel soruce code into a
+                // tmpfs returns error.FileNotFound in the arch/arm/include
+                // subdirectory.
+                nodes.sortSpan(dir_indicies.getLast(), nodes.len, struct {
                     names: []const []const u8,
 
                     pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
