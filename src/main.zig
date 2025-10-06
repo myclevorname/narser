@@ -186,10 +186,9 @@ pub fn main() !void {
     var fw = stdout.writer(&stdout_buffer);
     var writer = &fw.interface;
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer _ = gpa.deinit();
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 
-    const allocator = gpa.allocator();
+    const allocator = arena.allocator();
 
     var args = try std.process.ArgIterator.initWithAllocator(allocator);
     defer args.deinit();

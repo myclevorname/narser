@@ -180,6 +180,7 @@ pub const NixArchive = struct {
         /// The length of each file is always stored
         store_file_contents: bool = true,
     };
+
     pub const FromReaderError = std.mem.Allocator.Error || std.Io.Reader.Error || error{
         NotANar,
         InvalidToken,
@@ -625,12 +626,18 @@ pub const NixArchive = struct {
         }) = .empty;
         defer nodes.deinit(allocator);
 
+        try nodes.ensureUnusedCapacity(allocator, 4096);
+
         var dirs: std.ArrayList(std.fs.Dir.Iterator) = try .initCapacity(allocator, 1);
         defer dirs.deinit(allocator);
         errdefer for (dirs.items[1..]) |*d| d.dir.close();
 
+        try dirs.ensureUnusedCapacity(allocator, 16);
+
         var dir_indicies: std.ArrayList(usize) = .empty;
         defer dir_indicies.deinit(allocator);
+
+        try dir_indicies.ensureUnusedCapacity(allocator, 16);
 
         dirs.appendAssumeCapacity(dir.iterate());
 
@@ -641,7 +648,7 @@ pub const NixArchive = struct {
         loop: switch (Scan.scan_directory) {
             .scan_directory => {
                 try dir_indicies.append(allocator, nodes.len);
-                var last_iter = &dirs.items[dirs.items.len - 1];
+                const last_iter = &dirs.items[dirs.items.len - 1];
                 while (try last_iter.next()) |entry| {
                     try nodes.append(allocator, .{
                         .name = blk: {
