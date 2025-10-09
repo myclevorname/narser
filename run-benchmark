@@ -7,11 +7,11 @@ echo $1
 mkdir $1 || exit 1
 cd $1
 
-nix build git+https://git.lix.systems/lix-project/lix?rev=f31e8e2b55419c7f250f29ae6fbc59be4a4c259e -o lix >& /dev/null || exit 1
-nix build github:NixOS/nix/b0431a76f5645c43a60137401b76c22ba1710e1e -o nix >& /dev/null || exit 1
+nix build git+https://git.lix.systems/lix-project/lix?rev=42691f0d943b43842e69b76608cbe4416e35e94e -o lix >& /dev/null || exit 1
+nix build github:NixOS/nix/090f7fb05ef4ed23048b8be622a9421b284099f0 -o nix >& /dev/null || exit 1
 # narz fails in f790364c93142affa3cc699365545d6a11916a76
 nix build git+https://git.sr.ht/~watersucks/narz?rev=760736b98e08c7c741838f5ad020d6d2e33b5e57 -o narz >& /dev/null || exit 1
-nix build github:myclevorname/narser/b1dcf42285078137e0da5ded316039f81293a479 -o narser >& /dev/null || exit 1
+nix build git+https://codeberg.org/clevor/narser?rev=0eb4b4edeb4174eae2315aa6f0998adacdf1f55c -o narser >& /dev/null || exit 1
 nix build gitlab:abstract-binary/nix-nar-rs/c8d9250b9be837abafa0046cb9c2a852b846da6a -o nix-nar >& /dev/null || exit 1
 
 git clone https://github.com/torvalds/linux --depth=1 -q
@@ -51,13 +51,19 @@ cmp <(./nix/bin/nix nar ls linux.nar / -R 2> /dev/null) <(./narz/bin/narz ls lin
 cmp <(./nix/bin/nix nar ls linux.nar / -R) <(./nix-nar/bin/nix-nar ls linux.nar / -R)
 
 
-poop "./nix/bin/nix nar pack linux" "./lix/bin/nix nar dump-path linux" "./narser/bin/narser pack linux" "./nix-nar/bin/nix-nar dump-path linux"
-poop "./nix/bin/nix nar ls linux.nar /" "./lix/bin/nix nar ls linux.nar /" "./narser/bin/narser ls linux.nar /" "./nix-nar/bin/nix-nar ls linux.nar /" "./narz/bin/narz ls linux.nar /"
-poop "./nix/bin/nix nar ls linux.nar / -R" "./lix/bin/nix nar ls linux.nar / -R" "./narser/bin/narser ls linux.nar / -R" "./nix-nar/bin/nix-nar ls linux.nar / -R" "./narz/bin/narz ls linux.nar / -r"
-poop "./nix/bin/nix nar ls linux.nar / -Rl" "./lix/bin/nix nar ls linux.nar / -Rl" "./narser/bin/narser ls linux.nar / -Rl" "./nix-nar/bin/nix-nar ls linux.nar / -Rl" "./narz/bin/narz ls linux.nar / -rl"
-poop "./nix/bin/nix nar ls linux.nar / -l" "./lix/bin/nix nar ls linux.nar / -l" "./narser/bin/narser ls linux.nar / -l" "./nix-nar/bin/nix-nar ls linux.nar / -l" "./narz/bin/narz ls linux.nar / -l"
-poop "./nix/bin/nix nar cat linux.nar /README" "./lix/bin/nix nar cat linux.nar /README" "./narser/bin/narser cat linux.nar /README" "./narser/bin/narser cat linux.nar /README -L" "./nix-nar/bin/nix-nar cat linux.nar /README " "./narz/bin/narz cat linux.nar /README"
-poop "./nix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./lix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -L" "./nix-nar/bin/nix-nar cat linux.nar /virt/lib/irqbypass.c " "./narz/bin/narz cat linux.nar /virt/lib/irqbypass.c"
+poop -d 60000 "./nix/bin/nix nar pack linux" "./lix/bin/nix nar dump-path linux" "./narser/bin/narser pack linux" "./nix-nar/bin/nix-nar dump-path linux"
+
+poop -d 60000 "./nix/bin/nix nar ls linux.nar /" "./lix/bin/nix nar ls linux.nar /" "./narser/bin/narser ls linux.nar /" "./nix-nar/bin/nix-nar ls linux.nar /" "./narz/bin/narz ls linux.nar /"
+
+poop -d 60000 "./nix/bin/nix nar ls linux.nar / -R" "./lix/bin/nix nar ls linux.nar / -R" "./narser/bin/narser ls linux.nar / -R" "./nix-nar/bin/nix-nar ls linux.nar / -R" "./narz/bin/narz ls linux.nar / -r"
+
+poop -d 60000 "./nix/bin/nix nar ls linux.nar / -Rl" "./lix/bin/nix nar ls linux.nar / -Rl" "./narser/bin/narser ls linux.nar / -Rl" "./nix-nar/bin/nix-nar ls linux.nar / -Rl" "./narz/bin/narz ls linux.nar / -rl"
+
+poop -d 60000 "./nix/bin/nix nar ls linux.nar / -l" "./lix/bin/nix nar ls linux.nar / -l" "./narser/bin/narser ls linux.nar / -l" "./nix-nar/bin/nix-nar ls linux.nar / -l" "./narz/bin/narz ls linux.nar / -l"
+
+poop -d 60000 "./nix/bin/nix nar cat linux.nar /README" "./lix/bin/nix nar cat linux.nar /README" "./narser/bin/narser cat linux.nar /README" "./narser/bin/narser cat linux.nar /README -L" "./nix-nar/bin/nix-nar cat linux.nar /README " "./narz/bin/narz cat linux.nar /README"
+
+poop -d 60000 "./nix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./lix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -L" "./nix-nar/bin/nix-nar cat linux.nar /virt/lib/irqbypass.c " "./narz/bin/narz cat linux.nar /virt/lib/irqbypass.c"
 
 ./nix/bin/nix-store --restore out < linux.nar
 cmp <(./nix/bin/nix nar pack out) linux.nar
