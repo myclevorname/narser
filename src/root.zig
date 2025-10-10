@@ -710,12 +710,7 @@ pub const NixArchive = struct {
 
                             if (fr.getSize()) |size| {
                                 try writer.writeInt(u64, size, .little);
-                                var left = size;
-                                while (left != 0) {
-                                    const read = try writer.sendFileAll(&fr, .limited64(size));
-                                    left -= read;
-                                    if (read == 0 and left != 0) return error.EndOfStream;
-                                }
+                                try fr.interface.streamExact64(writer, size);
                                 try writePadding(writer, size);
                             } else |_| {
                                 @branchHint(.unlikely);
@@ -819,7 +814,7 @@ pub const NixArchive = struct {
 
         var currents: std.MultiArrayList(struct {
             name_buf: [std.fs.max_name_bytes]u8 = undefined,
-            last_name_len: ?Name = null,
+            last_name_len: Name = 0,
             dir: std.fs.Dir,
         }) = .empty;
         defer currents.deinit(allocator);
@@ -858,13 +853,11 @@ pub const NixArchive = struct {
                 }
 
                 const cur = currents.get(currents.len - 1);
-                if (cur.last_name_len) |l| switch (std.mem.order(u8, cur.name_buf[0..l], name)) {
+                switch (std.mem.order(u8, cur.name_buf[0..cur.last_name_len], name)) {
                     .lt => {},
                     .eq => return error.DuplicateObjectName,
-                    .gt => {
-                        return error.WrongDirectoryOrder;
-                    },
-                };
+                    .gt => return error.WrongDirectoryOrder,
+                }
 
                 @memcpy(currents.items(.name_buf)[currents.len - 1][0..name.len], name);
 
@@ -872,24 +865,17 @@ pub const NixArchive = struct {
 
                 try expectToken(reader, .directory_entry_inner);
 
-                const file_string = getTokenString(.file);
-                const directory_string = getTokenString(.directory);
-                const symlink_string = getTokenString(.symlink);
-                if (std.mem.eql(u8, file_string, try reader.peek(file_string.len)))
+                if (try takeToken(reader, .file))
                     continue :state .file
-                else if (std.mem.eql(u8, directory_string, try reader.peek(directory_string.len)))
+                else if (try takeToken(reader, .directory))
                     continue :state .directory
-                else if (std.mem.eql(u8, symlink_string, try reader.peek(symlink_string.len)))
+                else if (try takeToken(reader, .symlink))
                     continue :state .symlink
                 else
                     return error.InvalidToken;
             },
             .file => {
-                expectToken(reader, .file) catch unreachable;
-                const exec_token = getTokenString(.executable_file);
-                const is_executable = std.mem.eql(u8, try reader.peek(exec_token.len), exec_token);
-                if (is_executable) reader.toss(exec_token.len);
-
+                const is_executable = try takeToken(reader, .executable_file);
                 try expectToken(reader, .file_contents);
 
                 const size = try reader.takeInt(u64, .little);
@@ -897,7 +883,7 @@ pub const NixArchive = struct {
                 const cur = currents.get(currents.len - 1);
 
                 var file = try cur.dir.createFile(
-                    cur.name_buf[0..cur.last_name_len.?],
+                    cur.name_buf[0..cur.last_name_len],
                     .{ .mode = if (is_executable) 0o777 else 0o666 },
                 );
                 defer file.close();
@@ -914,44 +900,26 @@ pub const NixArchive = struct {
                 continue :state .directory_entry;
             },
             .symlink => {
-                expectToken(reader, .symlink) catch unreachable;
-
-                const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
-                    return error.NameTooLarge;
-                switch (size) {
-                    0 => return error.NameTooSmall,
-                    1...std.fs.max_path_bytes => {},
-                    else => return error.NameTooLarge,
-                }
+                const target = try takeTarget(reader);
 
                 const cur = currents.get(currents.len - 1);
-                const target = try reader.take(size);
-                if (std.mem.indexOfScalar(u8, target, 0) != null) return error.InvalidToken;
 
-                cur.dir.symLink(target, cur.name_buf[0..cur.last_name_len.?], .{}) catch |e| switch (e) {
+                cur.dir.symLink(target, cur.name_buf[0..cur.last_name_len], .{}) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => return e,
                 };
 
-                if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
-                    return error.InvalidToken;
-
                 try expectToken(reader, .directory_entry_end);
-
                 continue :state .directory_entry;
             },
             .directory => {
-                expectToken(reader, .directory) catch unreachable;
-
                 const cur = currents.get(currents.len - 1);
 
-                const entry_string = getTokenString(.directory_entry);
-
-                const has_children = std.mem.eql(u8, try reader.peek(entry_string.len), entry_string);
+                const has_children = try peekToken(reader, .directory_entry);
 
                 try currents.ensureUnusedCapacity(allocator, 1);
 
-                const child_name = cur.name_buf[0..cur.last_name_len.?];
+                const child_name = cur.name_buf[0..cur.last_name_len];
 
                 cur.dir.makeDir(child_name) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
