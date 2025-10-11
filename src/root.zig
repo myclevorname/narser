@@ -144,10 +144,10 @@ pub const NixArchive = struct {
 
     /// Returns the type of archive in the reader. Asserts the reader buffer is at least 80 bytes.
     pub fn peekType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
-        const magic = getTokenString(.magic);
-        const file = getTokenString(.file);
-        const directory = getTokenString(.directory);
-        const symlink = getTokenString(.symlink);
+        const magic = Token.toString(.magic);
+        const file = Token.toString(.file);
+        const directory = Token.toString(.directory);
+        const symlink = Token.toString(.symlink);
 
         if (magic.len + directory.len != 80) {
             @compileLog(magic.len + directory.len);
@@ -230,7 +230,7 @@ pub const NixArchive = struct {
         };
         state: switch (State.start) {
             .start => {
-                expectToken(reader, .magic) catch |e| switch (e) {
+                Token.expect(reader, .magic) catch |e| switch (e) {
                     error.ReadFailed => return e,
                     error.InvalidToken => return error.NotANar,
                 };
@@ -238,21 +238,21 @@ pub const NixArchive = struct {
                 continue :state .get_object_type;
             },
             .get_object_type => {
-                if (try takeToken(reader, .file))
+                if (try Token.take(reader, .file))
                     continue :state .file
-                else if (try takeToken(reader, .directory))
+                else if (try Token.take(reader, .directory))
                     continue :state .directory
-                else if (try takeToken(reader, .symlink))
+                else if (try Token.take(reader, .symlink))
                     continue :state .symlink
                 else
                     return error.InvalidToken;
             },
             .get_entry => {
-                try expectToken(reader, .directory_entry);
+                try Token.expect(reader, .directory_entry);
                 continue :state .get_entry_inner;
             },
             .get_entry_inner => {
-                const name = try takeName(reader);
+                const name = try Token.takeName(reader);
 
                 const copied = try self.name_pool.create();
                 @memcpy(copied[0..name.len], name);
@@ -263,15 +263,15 @@ pub const NixArchive = struct {
                     .eq => return error.DuplicateObjectName,
                     .gt => return error.WrongDirectoryOrder,
                 };
-                try expectToken(reader, .directory_entry_inner);
+                try Token.expect(reader, .directory_entry_inner);
                 continue :state .get_object_type;
             },
             .directory => {
                 current.data = .{ .directory = null };
                 if (current.entry != null) {
-                    if (try takeToken(reader, .directory_entry_end)) continue :state .next_skip_end;
+                    if (try Token.take(reader, .directory_entry_end)) continue :state .next_skip_end;
                 } else {
-                    if (try takeToken(reader, .archive_end))
+                    if (try Token.take(reader, .archive_end))
                         return self;
                 }
 
@@ -291,8 +291,8 @@ pub const NixArchive = struct {
             },
             .file => {
                 current.data = .{ .file = .{ .contents = undefined, .is_executable = false } };
-                if (try takeToken(reader, .executable_file)) current.data.file.is_executable = true;
-                try expectToken(reader, .file_contents);
+                if (try Token.take(reader, .executable_file)) current.data.file.is_executable = true;
+                try Token.expect(reader, .file_contents);
 
                 const len = std.math.cast(usize, try reader.takeInt(u64, .little)) orelse
                     return error.FileTooLarge; // e.g. len of 8 GB on a 32-bit system
@@ -310,7 +310,7 @@ pub const NixArchive = struct {
                     };
                     current.data.file.contents.len = len;
                 }
-                const pad = reader.take(padding(len)) catch |e| switch (e) {
+                const pad = reader.take(Token.padding(len)) catch |e| switch (e) {
                     error.ReadFailed => return e,
                     error.EndOfStream => return error.InvalidToken,
                 };
@@ -318,14 +318,14 @@ pub const NixArchive = struct {
                 continue :state .next;
             },
             .symlink => {
-                const name = try takeTarget(reader);
+                const name = try Token.takeTarget(reader);
                 const copied = try self.arena.allocator().dupe(u8, name);
                 current.data = .{ .symlink = copied };
                 continue :state .next;
             },
             .next => {
                 if (current.entry != null) {
-                    try expectToken(reader, .directory_entry_end);
+                    try Token.expect(reader, .directory_entry_end);
                     continue :state .leave_directory;
                 } else continue :state .end;
             },
@@ -333,10 +333,10 @@ pub const NixArchive = struct {
                 continue :state (if (current.entry != null) .leave_directory else .end);
             },
             .leave_directory => {
-                while (current.entry != null and try takeToken(reader, .directory_entry_end)) {
+                while (current.entry != null and try Token.take(reader, .directory_entry_end)) {
                     current = current.entry.?.parent;
                 } else {
-                    if (current.entry != null and try takeToken(reader, .directory_entry)) {
+                    if (current.entry != null and try Token.take(reader, .directory_entry)) {
                         const next = try self.pool.create();
                         current.entry.?.next = next;
                         next.* = .{
@@ -355,7 +355,7 @@ pub const NixArchive = struct {
                 }
             },
             .end => {
-                try expectToken(reader, .archive_end);
+                try Token.expect(reader, .archive_end);
                 return self;
             },
         }
@@ -509,41 +509,41 @@ pub const NixArchive = struct {
     pub fn toWriter(self: NixArchive, writer: *std.Io.Writer) !void {
         var node = self.root;
 
-        try writeTokens(writer, &.{.magic});
+        try Token.write(writer, &.{.magic});
 
         loop: while (true) {
             if (node.entry != null) {
-                try writeTokens(writer, &.{.directory_entry});
-                try writeStr(writer, node.entry.?.name);
-                try writeTokens(writer, &.{.directory_entry_inner});
+                try Token.write(writer, &.{.directory_entry});
+                try Token.writeStr(writer, node.entry.?.name);
+                try Token.write(writer, &.{.directory_entry_inner});
             }
 
             switch (node.data) {
                 .directory => |child| {
-                    try writeTokens(writer, &.{.directory});
+                    try Token.write(writer, &.{.directory});
                     if (child) |next| {
                         node = next;
                         continue;
                     }
                 },
                 .file => |data| {
-                    try writeTokens(writer, &.{.file});
-                    if (data.is_executable) try writeTokens(writer, &.{.executable_file});
-                    try writeTokens(writer, &.{.file_contents});
-                    try writeStr(writer, data.contents);
+                    try Token.write(writer, &.{.file});
+                    if (data.is_executable) try Token.write(writer, &.{.executable_file});
+                    try Token.write(writer, &.{.file_contents});
+                    try Token.writeStr(writer, data.contents);
                 },
                 .symlink => |link| {
-                    try writeTokens(writer, &.{.symlink});
-                    try writeStr(writer, link);
+                    try Token.write(writer, &.{.symlink});
+                    try Token.writeStr(writer, link);
                 },
             }
-            if (node.entry != null) try writeTokens(writer, &.{.directory_entry_end});
+            if (node.entry != null) try Token.write(writer, &.{.directory_entry_end});
             while ((node.entry orelse break :loop).next == null) {
                 node = node.entry.?.parent;
-                if (node.entry != null) try writeTokens(writer, &.{.directory_entry_end});
+                if (node.entry != null) try Token.write(writer, &.{.directory_entry_end});
             } else node = node.entry.?.next.?;
         }
-        try writeTokens(writer, &.{.archive_end});
+        try Token.write(writer, &.{.archive_end});
     }
 
     /// Unpacks a Nix archive into a directory.
@@ -643,7 +643,7 @@ pub const NixArchive = struct {
 
         const Scan = enum { scan_directory, print };
 
-        try writeTokens(writer, &.{ .magic, .directory });
+        try Token.write(writer, &.{ .magic, .directory });
 
         loop: switch (Scan.scan_directory) {
             .scan_directory => {
@@ -687,31 +687,31 @@ pub const NixArchive = struct {
                     const name = cur.name;
                     defer node_names.destroy(@ptrCast(@alignCast(name)));
 
-                    try writeTokens(writer, &.{.directory_entry});
-                    try writeStr(writer, name);
-                    try writeTokens(writer, &.{.directory_entry_inner});
+                    try Token.write(writer, &.{.directory_entry});
+                    try Token.writeStr(writer, name);
+                    try Token.write(writer, &.{.directory_entry_inner});
                     switch (cur.kind) {
                         .directory => {
-                            try writeTokens(writer, &.{.directory});
+                            try Token.write(writer, &.{.directory});
                             try dirs.ensureUnusedCapacity(allocator, 1);
                             const d = try dirs.getLast().dir.openDir(name, .{ .iterate = true });
                             dirs.appendAssumeCapacity(d.iterateAssumeFirstIteration());
                             continue :loop .scan_directory;
                         },
                         .file => {
-                            try writeTokens(writer, &.{.file});
+                            try Token.write(writer, &.{.file});
                             var file = try dirs.getLast().dir.openFile(name, .{});
                             defer file.close();
                             if (try file.mode() & 0o111 != 0)
-                                try writeTokens(writer, &.{.executable_file});
-                            try writeTokens(writer, &.{.file_contents});
+                                try Token.write(writer, &.{.executable_file});
+                            try Token.write(writer, &.{.file_contents});
 
                             var fr = file.reader(&.{});
 
                             if (fr.getSize()) |size| {
                                 try writer.writeInt(u64, size, .little);
                                 try fr.interface.streamExact64(writer, size);
-                                try writePadding(writer, size);
+                                try Token.writePadding(writer, size);
                             } else |_| {
                                 @branchHint(.unlikely);
                                 var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -723,25 +723,25 @@ pub const NixArchive = struct {
                                 const size = aw.writer.buffered().len;
                                 try writer.writeInt(u64, size, .little);
                                 try writer.writeAll(aw.writer.buffered());
-                                try writePadding(writer, size);
+                                try Token.writePadding(writer, size);
                             }
                         },
                         .symlink => {
-                            try writeTokens(writer, &.{.symlink});
+                            try Token.write(writer, &.{.symlink});
                             var buf: [std.fs.max_path_bytes]u8 = undefined;
                             const link = dirs.getLast().dir.readLink(name, &buf) catch |e|
                                 switch (e) {
                                     error.NameTooLong => unreachable,
                                     else => return e,
                                 };
-                            try writeStr(writer, link);
+                            try Token.writeStr(writer, link);
                         },
                     }
 
-                    try writeTokens(writer, &.{.directory_entry_end});
+                    try Token.write(writer, &.{.directory_entry_end});
                 } else {
                     if (dirs.items.len == 1) break :loop;
-                    try writeTokens(writer, &.{.directory_entry_end});
+                    try Token.write(writer, &.{.directory_entry_end});
                     _ = dir_indicies.pop().?;
                     var d = dirs.pop().?;
                     d.dir.close();
@@ -750,7 +750,7 @@ pub const NixArchive = struct {
             },
         }
 
-        try writeTokens(writer, &.{.archive_end});
+        try Token.write(writer, &.{.archive_end});
     }
 
     /// Takes a reader and serializes its contents as a Nix Archive of a file into `writer`. This is
@@ -762,9 +762,9 @@ pub const NixArchive = struct {
         executable: bool,
         size: ?u64,
     ) !void {
-        try writeTokens(writer, &.{ .magic, .file });
-        if (executable) try writeTokens(writer, &.{.executable_file});
-        try writeTokens(writer, &.{.file_contents});
+        try Token.write(writer, &.{ .magic, .file });
+        if (executable) try Token.write(writer, &.{.executable_file});
+        try Token.write(writer, &.{.file_contents});
 
         const sz = blk: {
             if (size) |s| {
@@ -793,15 +793,15 @@ pub const NixArchive = struct {
                 break :blk s;
             }
         };
-        try writePadding(writer, sz);
+        try Token.writePadding(writer, sz);
 
-        try writeTokens(writer, &.{.archive_end});
+        try Token.write(writer, &.{.archive_end});
     }
 
     pub fn packSymlink(target: []const u8, writer: *std.Io.Writer) !void {
-        try writeTokens(writer, &.{ .magic, .symlink });
-        try writeStr(writer, target);
-        try writeTokens(writer, &.{.archive_end});
+        try Token.write(writer, &.{ .magic, .symlink });
+        try Token.writeStr(writer, target);
+        try Token.write(writer, &.{.archive_end});
     }
 
     pub fn unpackDirectory(
@@ -825,24 +825,24 @@ pub const NixArchive = struct {
 
         const State = enum { directory_entry, directory, file, symlink, end, leave_directory };
 
-        expectToken(reader, .magic) catch |e| switch (e) {
+        Token.expect(reader, .magic) catch |e| switch (e) {
             error.InvalidToken => return error.NotANar,
             error.ReadFailed => return error.ReadFailed,
         };
 
-        expectToken(reader, .directory) catch |e| switch (e) {
+        Token.expect(reader, .directory) catch |e| switch (e) {
             error.InvalidToken => return error.WrongArchiveType,
             error.ReadFailed => return error.ReadFailed,
         };
 
         state: switch (State.directory_entry) {
             .directory_entry => {
-                expectToken(reader, .directory_entry) catch |e| switch (e) {
+                Token.expect(reader, .directory_entry) catch |e| switch (e) {
                     error.InvalidToken => continue :state .leave_directory,
                     else => return e,
                 };
 
-                const name = try takeName(reader);
+                const name = try Token.takeName(reader);
 
                 if (std.mem.indexOfScalar(u8, name, 0) != null or
                     std.mem.indexOfScalar(u8, name, '/') != null or
@@ -863,20 +863,20 @@ pub const NixArchive = struct {
 
                 currents.items(.last_name_len)[currents.len - 1] = @intCast(name.len);
 
-                try expectToken(reader, .directory_entry_inner);
+                try Token.expect(reader, .directory_entry_inner);
 
-                if (try takeToken(reader, .file))
+                if (try Token.take(reader, .file))
                     continue :state .file
-                else if (try takeToken(reader, .directory))
+                else if (try Token.take(reader, .directory))
                     continue :state .directory
-                else if (try takeToken(reader, .symlink))
+                else if (try Token.take(reader, .symlink))
                     continue :state .symlink
                 else
                     return error.InvalidToken;
             },
             .file => {
-                const is_executable = try takeToken(reader, .executable_file);
-                try expectToken(reader, .file_contents);
+                const is_executable = try Token.take(reader, .executable_file);
+                try Token.expect(reader, .file_contents);
 
                 const size = try reader.takeInt(u64, .little);
 
@@ -892,15 +892,15 @@ pub const NixArchive = struct {
                 try reader.streamExact64(&fw.interface, size);
                 try fw.interface.flush();
 
-                if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+                if (!std.mem.allEqual(u8, try reader.take(Token.padding(size)), 0))
                     return error.InvalidToken;
 
-                try expectToken(reader, .directory_entry_end);
+                try Token.expect(reader, .directory_entry_end);
 
                 continue :state .directory_entry;
             },
             .symlink => {
-                const target = try takeTarget(reader);
+                const target = try Token.takeTarget(reader);
 
                 const cur = currents.get(currents.len - 1);
 
@@ -909,13 +909,13 @@ pub const NixArchive = struct {
                     else => return e,
                 };
 
-                try expectToken(reader, .directory_entry_end);
+                try Token.expect(reader, .directory_entry_end);
                 continue :state .directory_entry;
             },
             .directory => {
                 const cur = currents.get(currents.len - 1);
 
-                const has_children = try peekToken(reader, .directory_entry);
+                const has_children = try Token.peek(reader, .directory_entry);
 
                 try currents.ensureUnusedCapacity(allocator, 1);
 
@@ -928,21 +928,21 @@ pub const NixArchive = struct {
                 if (has_children) {
                     const child = try cur.dir.openDir(child_name, .{});
                     currents.appendAssumeCapacity(.{ .dir = child });
-                } else try expectToken(reader, .directory_entry_end);
+                } else try Token.expect(reader, .directory_entry_end);
                 continue :state .directory_entry;
             },
             .leave_directory => {
                 if (currents.len == 1)
                     continue :state .end
                 else {
-                    try expectToken(reader, .directory_entry_end);
+                    try Token.expect(reader, .directory_entry_end);
                     var cur = currents.pop().?;
                     cur.dir.close();
                     continue :state .directory_entry;
                 }
             },
             .end => {
-                try expectToken(reader, .archive_end);
+                try Token.expect(reader, .archive_end);
                 return;
             },
         }
@@ -953,41 +953,41 @@ pub const NixArchive = struct {
     /// Returns whether the file is executable. This is faster and more memory-efficient than calling
     /// `fromReader` followed by `pack`.
     pub fn unpackFile(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
-        expectToken(reader, .magic) catch |e| switch (e) {
+        Token.expect(reader, .magic) catch |e| switch (e) {
             error.InvalidToken => return error.NotANar,
             error.ReadFailed => return e,
         };
 
-        try expectToken(reader, .file);
+        try Token.expect(reader, .file);
 
-        const exec_token = getTokenString(.executable_file);
+        const exec_token = Token.toString(.executable_file);
 
         const is_executable = if (std.mem.eql(u8, try reader.peek(exec_token.len), exec_token)) blk: {
             reader.toss(exec_token.len);
             break :blk true;
         } else false;
 
-        try expectToken(reader, .file_contents);
+        try Token.expect(reader, .file_contents);
 
         const size = try reader.takeInt(u64, .little);
         try reader.streamExact64(writer, size);
 
-        if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+        if (!std.mem.allEqual(u8, try reader.take(Token.padding(size)), 0))
             return error.InvalidToken;
 
-        try expectToken(reader, .archive_end);
+        try Token.expect(reader, .archive_end);
         return is_executable;
     }
 
     /// Reads a Nix archive containing a single symlink and returns the target. This is faster and
     /// more memory-efficient than calling `fromReader`.
     pub fn unpackSymlink(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
-        expectToken(reader, .magic) catch |e| switch (e) {
+        Token.expect(reader, .magic) catch |e| switch (e) {
             error.InvalidToken => return error.NotANar,
             error.ReadFailed => return e,
         };
 
-        try expectToken(reader, .symlink);
+        try Token.expect(reader, .symlink);
 
         const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
             return error.NameTooLarge;
@@ -999,10 +999,10 @@ pub const NixArchive = struct {
 
         @memcpy(buffer[0..size], try reader.take(size));
 
-        if (!std.mem.allEqual(u8, try reader.take(padding(size)), 0))
+        if (!std.mem.allEqual(u8, try reader.take(Token.padding(size)), 0))
             return error.InvalidToken;
 
-        try expectToken(reader, .archive_end);
+        try Token.expect(reader, .archive_end);
         return buffer[0..size];
     }
 
@@ -1047,37 +1047,37 @@ pub const NixArchive = struct {
 
         state: switch (State.start) {
             .start => {
-                expectToken(reader, .magic) catch |e| switch (e) {
+                Token.expect(reader, .magic) catch |e| switch (e) {
                     error.InvalidToken => return error.NotANar,
                     else => return e,
                 };
 
-                if (try takeToken(reader, .directory)) {
+                if (try Token.take(reader, .directory)) {
                     if (parts.items.len == 0) return error.IsDir;
                     names.appendAssumeCapacity(.{
                         .name = undefined,
                         .len = 0,
                     });
                     continue :state .entry_take;
-                } else if (try takeToken(reader, .file))
+                } else if (try Token.take(reader, .file))
                     continue :state if (parts.items.len == 0) .take_file else return error.Symlink
-                else if (try takeToken(reader, .symlink))
+                else if (try Token.take(reader, .symlink))
                     return error.IsSymlink;
                 unreachable;
             },
             .object_type_skip => {
-                if (try takeToken(reader, .directory))
+                if (try Token.take(reader, .directory))
                     continue :state .skip_directory
-                else if (try takeToken(reader, .file))
+                else if (try Token.take(reader, .file))
                     continue :state .skip_file
-                else if (try takeToken(reader, .symlink))
+                else if (try Token.take(reader, .symlink))
                     continue :state .skip_symlink
                 else
                     return error.InvalidToken;
             },
             .take_file => {
-                const executable = try takeToken(reader, .executable_file);
-                try expectToken(reader, .file_contents);
+                const executable = try Token.take(reader, .executable_file);
+                try Token.expect(reader, .file_contents);
                 const len = try reader.takeInt(u64, .little);
                 try reader.streamExact64(writer, len);
                 return executable; // Skip processing the rest of the archive
@@ -1091,12 +1091,12 @@ pub const NixArchive = struct {
                 continue :state .entry_take;
             },
             .skip_file => {
-                _ = try takeToken(reader, .executable_file);
-                try expectToken(reader, .file_contents);
+                _ = try Token.take(reader, .executable_file);
+                try Token.expect(reader, .file_contents);
                 const len = try reader.takeInt(u64, .little);
                 try reader.discardAll64(len);
 
-                if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                if (!std.mem.allEqual(u8, try reader.take(Token.padding(len)), 0))
                     return error.InvalidPadding;
 
                 continue :state if (skip_depth == 0) .next_take else .next_skip;
@@ -1107,13 +1107,13 @@ pub const NixArchive = struct {
                 if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
                 try reader.discardAll64(len);
 
-                if (!std.mem.allEqual(u8, try reader.take(padding(len)), 0))
+                if (!std.mem.allEqual(u8, try reader.take(Token.padding(len)), 0))
                     return error.InvalidPadding;
 
                 continue :state if (skip_depth == 0) .next_take else .next_skip;
             },
             .skip_directory => {
-                if (try peekToken(reader, .directory_entry_end))
+                if (try Token.peek(reader, .directory_entry_end))
                     continue :state if (skip_depth == 0) .next_take else .next_skip;
 
                 skip_depth += 1;
@@ -1126,21 +1126,21 @@ pub const NixArchive = struct {
                 continue :state .entry_skip;
             },
             .object_type_take => {
-                if (try takeToken(reader, .directory))
+                if (try Token.take(reader, .directory))
                     continue :state .take_directory
-                else if (try takeToken(reader, .file))
+                else if (try Token.take(reader, .file))
                     continue :state .take_file
-                else if (try takeToken(reader, .symlink))
+                else if (try Token.take(reader, .symlink))
                     return error.Symlink;
 
                 return error.InvalidToken;
             },
             .entry_take => {
                 //std.debug.print("Taking.\n", .{});
-                if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
-                try expectToken(reader, .directory_entry);
+                if (names.len == 0 and try Token.peek(reader, .archive_end)) return error.NoSuchFile;
+                try Token.expect(reader, .directory_entry);
 
-                const name = try takeName(reader);
+                const name = try Token.takeName(reader);
                 //std.debug.print("name = {s}\n", .{name});
 
                 const name_bufs = names.items(.name);
@@ -1155,7 +1155,7 @@ pub const NixArchive = struct {
                 @memcpy(name_bufs[names.len - 1][0..name.len], name);
                 name_lens[names.len - 1] = @intCast(name.len);
 
-                try expectToken(reader, .directory_entry_inner);
+                try Token.expect(reader, .directory_entry_inner);
 
                 switch (std.mem.order(u8, name, parts.items[names.len - 1])) {
                     .lt => continue :state .object_type_skip,
@@ -1165,10 +1165,10 @@ pub const NixArchive = struct {
             },
             .entry_skip => {
                 //std.debug.print("Skipping.\n", .{});
-                if (names.len == 0 and try peekToken(reader, .archive_end)) return error.NoSuchFile;
-                try expectToken(reader, .directory_entry);
+                if (names.len == 0 and try Token.peek(reader, .archive_end)) return error.NoSuchFile;
+                try Token.expect(reader, .directory_entry);
 
-                const name = try takeName(reader);
+                const name = try Token.takeName(reader);
                 //std.debug.print("name = {s}, depth = {}\n", .{name, skip_depth});
 
                 const name_bufs = names.items(.name);
@@ -1183,20 +1183,20 @@ pub const NixArchive = struct {
                 @memcpy(name_bufs[names.len - 1][0..name.len], name);
                 name_lens[names.len - 1] = @intCast(name.len);
 
-                try expectToken(reader, .directory_entry_inner);
+                try Token.expect(reader, .directory_entry_inner);
 
                 continue :state .object_type_skip;
             },
             .next_take => {
                 std.debug.assert(skip_depth == 0);
-                try expectToken(reader, .directory_entry_end);
-                if (try peekToken(reader, .directory_entry_end)) return error.NoSuchFile;
+                try Token.expect(reader, .directory_entry_end);
+                if (try Token.peek(reader, .directory_entry_end)) return error.NoSuchFile;
                 continue :state .entry_take;
             },
             .next_skip => {
                 std.debug.assert(skip_depth != 0);
-                try expectToken(reader, .directory_entry_end);
-                while (try takeToken(reader, .directory_entry_end)) {
+                try Token.expect(reader, .directory_entry_end);
+                while (try Token.take(reader, .directory_entry_end)) {
                     _ = names.pop();
                     skip_depth -= 1;
                     if (skip_depth == 0) continue :state .entry_take;
@@ -1230,7 +1230,8 @@ fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
     }
 }
 
-const Token = enum {
+/// The tokens used to build Nix archive parsers. Tokens are combined as an implementation detail.
+pub const Token = enum {
     magic,
     archive_end,
     directory,
@@ -1241,121 +1242,122 @@ const Token = enum {
     directory_entry,
     directory_entry_inner,
     directory_entry_end,
+
+    pub const map = std.StaticStringMap(Token).initComptime(.{
+        .{ str("nix-archive-1"), .magic },
+        .{ str(")"), .archive_end },
+        .{ str("(") ++ str("type") ++ str("directory"), .directory },
+        .{ str("(") ++ str("type") ++ str("regular"), .file },
+        .{ str("(") ++ str("type") ++ str("symlink") ++ str("target"), .symlink },
+        .{ str("executable") ++ str(""), .executable_file },
+        .{ str("contents"), .file_contents },
+        .{ str("entry") ++ str("(") ++ str("name"), .directory_entry },
+        .{ str(")") ++ str(")"), .directory_entry_end },
+        .{ str("node"), .directory_entry_inner },
+    });
+
+    /// Returns whether the token was matched, absorbing it.
+    pub fn take(reader: *std.Io.Reader, comptime token: Token) error{ReadFailed}!bool {
+        return if (expect(reader, token)) |_| true else |e| switch (e) {
+            error.ReadFailed => error.ReadFailed,
+            error.InvalidToken => false,
+        };
+    }
+
+    /// Returns whether the token was matched without absorbing it.
+    pub fn peek(reader: *std.Io.Reader, comptime token: Token) !bool {
+        const taken = reader.peek(toString(token).len) catch |e| switch (e) {
+            error.EndOfStream => return false,
+            error.ReadFailed => return error.ReadFailed,
+        };
+
+        return std.mem.eql(u8, toString(token), taken);
+    }
+
+    /// Absorb the token and fail if not found.
+    pub fn expect(reader: *std.Io.Reader, comptime token: Token) !void {
+        return if (peek(reader, token)) |r| switch (r) {
+            true => {
+                reader.toss(toString(token).len);
+                //std.debug.print("Got token {t}\n", .{token});
+            },
+            false => error.InvalidToken,
+        } else |e| switch (e) {
+            error.ReadFailed => error.ReadFailed,
+        };
+    }
+
+    pub fn write(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
+        comptime var concatenated: []const u8 = "";
+
+        comptime {
+            for (tokens) |token| concatenated = concatenated ++ toString(token);
+        }
+
+        try writer.writeAll(concatenated);
+    }
+
+    inline fn toString(comptime value: Token) []const u8 {
+        comptime {
+            const values = Token.map.values();
+            const index = std.mem.indexOfScalar(Token, values, value).?;
+
+            return Token.map.keys()[index];
+        }
+    }
+
+    pub fn takeName(reader: *std.Io.Reader) ![]u8 {
+        const len = std.math.cast(Name, try reader.takeInt(u64, .little)) orelse
+            return error.NameTooLarge;
+        if (len == 0) return error.NameTooSmall;
+        if (len > std.fs.max_name_bytes) return error.NameTooLarge;
+
+        const read = try reader.take(std.mem.alignForward(Name, len, 8));
+
+        if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
+
+        return read[0..len];
+    }
+
+    pub fn takeTarget(reader: *std.Io.Reader) ![]u8 {
+        const len = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
+            return error.TargetTooLarge;
+
+        if (len == 0) return error.TargetTooSmall;
+        if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
+
+        const read = try reader.take(std.mem.alignForward(Target, len, 8));
+
+        if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
+
+        return read[0..len];
+    }
+
+    /// Converts a string to the format used in Nix archives.
+    pub fn str(comptime string: []const u8) []const u8 {
+        comptime {
+            var buffer: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buffer, string.len, .little);
+
+            const zeroes: [7]u8 = .{0} ** 7;
+            return buffer ++ string ++ (if (string.len % 8 == 0) [0]u8{} else zeroes[0..padding(string.len)]);
+        }
+    }
+
+    fn writeStr(writer: *std.Io.Writer, string: []const u8) !void {
+        try writer.writeInt(u64, string.len, .little);
+        try writer.writeAll(string);
+        try writePadding(writer, string.len);
+    }
+
+    fn writePadding(writer: *std.Io.Writer, size: u64) !void {
+        try writer.splatByteAll(0, padding(size));
+    }
+
+    fn padding(size: u64) u3 {
+        return @truncate(-%size);
+    }
 };
-
-const token_map = std.StaticStringMap(Token).initComptime(.{
-    .{ str("nix-archive-1") ++ str("("), .magic },
-    .{ str(")"), .archive_end },
-    .{ str("type") ++ str("directory"), .directory },
-    .{ str("type") ++ str("regular"), .file },
-    .{ str("type") ++ str("symlink") ++ str("target"), .symlink },
-    .{ str("executable") ++ str(""), .executable_file },
-    .{ str("contents"), .file_contents },
-    .{ str("entry") ++ str("(") ++ str("name"), .directory_entry },
-    .{ str(")") ++ str(")"), .directory_entry_end },
-    .{ str("node") ++ str("("), .directory_entry_inner },
-});
-
-inline fn getTokenString(comptime value: Token) []const u8 {
-    comptime {
-        const values = token_map.values();
-        const index = std.mem.indexOfScalar(Token, values, value).?;
-
-        return token_map.keys()[index];
-    }
-}
-
-fn takeToken(reader: *std.Io.Reader, comptime token: Token) error{ReadFailed}!bool {
-    return if (expectToken(reader, token)) |_| true else |e| switch (e) {
-        error.ReadFailed => error.ReadFailed,
-        error.InvalidToken => false,
-    };
-}
-
-fn peekToken(reader: *std.Io.Reader, comptime token: Token) !bool {
-    const taken = reader.peek(getTokenString(token).len) catch |e| switch (e) {
-        error.EndOfStream => return false,
-        error.ReadFailed => return error.ReadFailed,
-    };
-
-    return std.mem.eql(u8, getTokenString(token), taken);
-}
-
-fn expectToken(reader: *std.Io.Reader, comptime token: Token) !void {
-    return if (peekToken(reader, token)) |r| switch (r) {
-        true => {
-            reader.toss(getTokenString(token).len);
-            //std.debug.print("Got token {t}\n", .{token});
-        },
-        false => error.InvalidToken,
-    } else |e| switch (e) {
-        error.ReadFailed => error.ReadFailed,
-    };
-}
-
-fn writeTokens(writer: *std.Io.Writer, comptime tokens: []const Token) !void {
-    comptime var concatenated: []const u8 = "";
-
-    comptime {
-        for (tokens) |token| concatenated = concatenated ++ getTokenString(token);
-    }
-
-    try writer.writeAll(concatenated);
-}
-
-fn takeName(reader: *std.Io.Reader) ![]u8 {
-    const len = std.math.cast(Name, try reader.takeInt(u64, .little)) orelse
-        return error.NameTooLarge;
-    if (len == 0) return error.NameTooSmall;
-    if (len > std.fs.max_name_bytes) return error.NameTooLarge;
-
-    const read = try reader.take(std.mem.alignForward(Name, len, 8));
-
-    if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
-
-    return read[0..len];
-}
-
-fn takeTarget(reader: *std.Io.Reader) ![]u8 {
-    const len = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
-        return error.TargetTooLarge;
-
-    if (len == 0) return error.TargetTooSmall;
-    if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
-
-    const read = try reader.take(std.mem.alignForward(Target, len, 8));
-
-    if (!std.mem.allEqual(u8, read[len..], 0)) return error.InvalidPadding;
-
-    return read[0..len];
-}
-
-fn writeStr(writer: *std.Io.Writer, string: []const u8) !void {
-    var buffer: [8]u8 = undefined;
-    std.mem.writeInt(u64, &buffer, string.len, .little);
-
-    const zeroes: [7]u8 = .{0} ** 7;
-
-    try writer.print("{s}{s}{s}", .{ &buffer, string, zeroes[0 .. (8 - string.len % 8) % 8] });
-}
-
-fn writePadding(writer: *std.Io.Writer, size: u64) !void {
-    try writer.splatByteAll(0, padding(size));
-}
-
-fn padding(size: u64) u3 {
-    return @truncate(-%size);
-}
-
-fn str(comptime string: anytype) []const u8 {
-    comptime {
-        var buffer: [8]u8 = undefined;
-        std.mem.writeInt(u64, &buffer, string.len, .little);
-
-        const zeroes: [7]u8 = .{0} ** 7;
-        return buffer ++ string ++ (if (string.len % 8 == 0) [0]u8{} else zeroes[0 .. (8 - string.len % 8) % 8]);
-    }
-}
 
 test {
     _ = std.testing.refAllDeclsRecursive(@This());

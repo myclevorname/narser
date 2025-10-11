@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const has_new_linker = @import("builtin").zig_version.order(
+    std.SemanticVersion.parse("0.16.0-dev.369+f58200e3f") catch unreachable,
+) != .lt;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -33,6 +37,8 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "lib", .module = narser }},
         }),
     });
+    if (has_new_linker)
+        exe.use_new_linker = false; // https://github.com/ziglang/zig/issues/25534
 
     b.installFile("src/_narser.bash", "share/bash-completion/completions/narser");
     if (no_bin)
@@ -58,12 +64,16 @@ pub fn build(b: *std.Build) void {
     const narser_unit_tests = b.addTest(.{
         .root_module = narser,
     });
+    if (has_new_linker)
+        narser_unit_tests.use_new_linker = false; // https://github.com/ziglang/zig/issues/25534
 
     const run_narser_unit_tests = b.addRunArtifact(narser_unit_tests);
 
     const exe_unit_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    if (has_new_linker)
+        exe_unit_tests.use_new_linker = false; // https://github.com/ziglang/zig/issues/25534
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
