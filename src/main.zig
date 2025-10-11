@@ -242,7 +242,7 @@ pub fn main() !void {
             try narser.NixArchive.packFile(
                 allocator,
                 &fr.interface,
-                writer,
+                used_writer,
                 opts.executable orelse false,
                 fr.getSize() catch null,
             );
@@ -267,7 +267,7 @@ pub fn main() !void {
                         try narser.NixArchive.packFile(
                             allocator,
                             &fr.interface,
-                            writer,
+                            used_writer,
                             stat.mode & 0o111 != 0,
                             fr.getSize() catch null,
                         );
@@ -279,11 +279,7 @@ pub fn main() !void {
         if (use_hasher) {
             used_writer.flush() catch unreachable;
             const sha256_hash = hash_upd.hasher.finalResult();
-            var base64_hash: [44]u8 = undefined;
-
-            _ = std.base64.standard.Encoder.encode(&base64_hash, &sha256_hash);
-
-            try writer.print("sha256-{s}\n", .{base64_hash});
+            try writer.print("sha256-{b64}\n", .{sha256_hash});
         }
     } else if (std.mem.eql(u8, "ls", command)) {
         var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
