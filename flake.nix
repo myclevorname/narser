@@ -19,24 +19,27 @@
       in
       {
         formatter = pkgs.nixfmt-tree;
-        packages = rec {
-          default = pkgs.stdenv.mkDerivation (final: {
+        packages = {
+          default = pkgs.stdenv.mkDerivation (finalAttrs: {
             name = "narser";
             src = self;
             nativeBuildInputs = [ zig.hook ];
             zigBuildFlags = "-Dstrip";
+            doCheck = true;
           });
           fast = pkgs.stdenv.mkDerivation (final: {
             name = "narser";
             src = self;
             nativeBuildInputs = [ zig.hook ];
             zigBuildFlags = "-Dstrip -Doptimize=ReleaseFast";
+            doCheck = true;
           });
           small = pkgs.stdenv.mkDerivation (final: {
             name = "narser";
             src = self;
             nativeBuildInputs = [ zig.hook ];
             zigBuildFlags = "-Dstrip -Doptimize=ReleaseSmall";
+            doCheck = true;
           });
         };
         devShells.default = pkgs.mkShell {

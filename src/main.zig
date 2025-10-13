@@ -191,11 +191,11 @@ pub fn main() !void {
     const allocator = arena.allocator();
 
     var args = try std.process.ArgIterator.initWithAllocator(allocator);
-    defer args.deinit();
+    //defer args.deinit();
     _ = args.skip();
 
     var processed_args: std.ArrayList([]const u8) = .empty;
-    defer processed_args.deinit(allocator);
+    //defer processed_args.deinit(allocator);
 
     var opts_iter = OptsIter.init(&args);
     const Options = struct {
@@ -235,7 +235,7 @@ pub fn main() !void {
         const used_writer = if (use_hasher) &hash_upd.writer else writer;
 
         const argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
-        var in_buf: [4096]u8 = undefined;
+        var in_buf: [8192]u8 = undefined;
 
         if (std.mem.eql(u8, "-", argument)) {
             var fr = std.fs.File.stdin().reader(&in_buf);
@@ -288,13 +288,13 @@ pub fn main() !void {
         var in_file = try std.fs.cwd().openFile(argument, .{});
         defer in_file.close();
 
-        var in_buf: [4096]u8 = undefined;
+        var in_buf: [8192]u8 = undefined;
         var in_reader = in_file.reader(&in_buf);
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
         var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{ .store_file_contents = false });
-        defer archive.deinit();
+        //defer archive.deinit();
 
         archive.root = archive.root.subPath(subpath) catch |e| switch (e) {
             error.NotDir => fatal("In archive: expected directory", .{}),
@@ -312,14 +312,60 @@ pub fn main() !void {
         var in_file = try std.fs.cwd().openFile(archive_path, .{});
         defer in_file.close();
 
-        var in_buf: [4096]u8 = undefined;
+        var in_buf: [8192]u8 = undefined;
         var in_reader = in_file.reader(&in_buf);
 
         if (!opts.follow) {
-            _ = try narser.NixArchive.unpackSubFile(allocator, &in_reader.interface, writer, subpath);
+            var iter: narser.NixArchive.UnpackIterator = .init(allocator, &in_reader.interface);
+            //defer iter.deinit();
+
+            var parts: std.ArrayList([]const u8) = .empty;
+            try parts.ensureTotalCapacity(allocator, 1 + std.mem.count(u8, subpath, "/"));
+            narser.normalizePath(&parts, subpath);
+
+            const kind = try narser.NixArchive.peekType(&in_reader.interface);
+
+            switch (kind) {
+                .file => if (parts.items.len == 0) {
+                    _ = (try iter.first(writer, 0)).file;
+                } else return error.NotDir,
+                .symlink => return error.IsSymlink,
+                .directory => if (parts.items.len == 0)
+                    return error.IsDir
+                else {
+                    std.debug.assert(try iter.first(null, null) == .directory);
+                    level: for (0..parts.items.len) |i| {
+                        while (try iter.next()) |e| {
+                            //std.debug.print("found '{s}' (expecting '{s}')\n", .{ e.name, parts.items[i] });
+                            switch (std.mem.order(u8, e.name, parts.items[i])) {
+                                .lt => {
+                                    const a = iter.names.len;
+                                    try iter.skip(e);
+                                    std.debug.assert(a == iter.names.len);
+                                },
+                                .eq => {
+                                    if (i == parts.items.len - 1) {
+                                        if (e.kind != .file) return error.NotFile;
+                                        std.debug.assert(try iter.take(e, writer) == .file);
+                                        break :level;
+                                    } else {
+                                        if (e.kind != .directory) return error.NotDir;
+                                        std.debug.assert(try iter.take(e, null) == .directory);
+                                        continue :level;
+                                    }
+                                    comptime unreachable;
+                                },
+                                .gt => return error.FileNotFound,
+                            }
+                        } else return error.FileNotFound;
+                    }
+                },
+            }
+
+            // _ = try narser.NixArchive.unpackSubFile(allocator, &in_reader.interface, writer, subpath);
         } else {
             var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{});
-            defer archive.deinit();
+            //defer archive.deinit();
 
             switch (archive.root.data) {
                 .directory => |child| if (child == null) fatal("Archive is an empty directory", .{}),
