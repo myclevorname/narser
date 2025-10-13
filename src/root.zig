@@ -142,6 +142,129 @@ pub const NixArchive = struct {
         }
     };
 
+    /// A higher-level iterator built upon `Token`.
+    /// TODO: Come up with a better description
+    /// The reader's buffer must have at least `std.fs.max_path_bytes` bytes.
+    pub const ReaderIterator = struct {
+        allocator: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        names: std.MultiArrayList(struct {
+            name: [std.fs.max_name_bytes]u8,
+            len: Name,
+        }),
+        is_root_node: bool,
+
+        pub const Entry = struct {
+            /// Invalidated upon `ReaderIterator.skip` or TODO.
+            name: []const u8,
+            kind: std.meta.Tag(Object.Data),
+        };
+
+        pub const Contents = union(std.meta.Tag(Object.Data)) {
+            file: bool,
+            symlink: []const u8,
+            directory,
+        };
+
+        pub fn init(allocator: std.mem.Allocator, reader: *std.Io.Reader) ReaderIterator {
+            std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
+            return .{
+                .allocator = allocator,
+                .reader = reader,
+                .names = .empty,
+                .is_root_node = true,
+            };
+        }
+
+        pub fn deinit(self: *ReaderIterator) void {
+            self.names.deinit(self.allocator);
+            self.* = undefined;
+        }
+
+        /// Skip the current entry and its contents.
+        pub fn skip(self: *ReaderIterator, entry: Entry) !void {
+            std.debug.assert(!self.is_root_node);
+            const State = enum {
+                start,
+                file,
+                symlink,
+                next,
+            };
+
+            var depth: u64 = 0;
+
+            state: switch (State.start) {
+                .start => switch (entry.kind) {
+                    .file => continue :state .file,
+                    .symlink => continue :state .symlink,
+                    .directory => {
+                        depth += 1;
+                        const i = try self.names.addOne(self.allocator);
+                        self.names.items(.len)[i] = 0;
+                        continue :state .next;
+                    },
+                },
+                .file => {
+                    _ = try Token.take(self.reader, .executable_file);
+                    try Token.expect(self.reader, .file_contents);
+                    const len = try self.reader.takeInt(u64, .little);
+                    try self.reader.discardAll64(len);
+                    const zeroes = try self.reader.take(Token.padding(len));
+                    if (!std.mem.allEqual(u8, zeroes, 0))
+                        return error.InvalidPadding;
+                    try Token.expect(self.reader, .directory_entry_end);
+                    continue :state .next;
+                },
+                .symlink => {
+                    _ = try Token.takeTarget(self.reader);
+                    try Token.expect(self.reader, .directory_entry_end);
+                    continue :state .next;
+                },
+                .next => {
+                    if (try Token.take(self.reader, .directory_entry)) {
+                        const name = try Token.takeName(self.reader);
+                        const name_buf = &self.names.items(.name)[self.names.len - 1];
+                        const len = &self.names.items(.len)[self.names.len - 1];
+
+                        switch (std.mem.order(u8, name_buf[0..len.*], name)) {
+                            .lt => {},
+                            .eq => return error.DuplicateObjectName,
+                            .gt => return error.WrongDirectoryOrder,
+                        }
+
+                        @memcpy(name_buf[0..name.len], name);
+                        len.* = @intCast(name.len);
+
+                        if (try Token.take(self.reader, .file))
+                            continue :state .file
+                        else if (try Token.take(self.reader, .directory)) {
+                            depth += 1;
+                            const i = try self.names.addOne(self.allocator);
+                            self.names.items(.len)[i] = 0;
+                            continue :state .next;
+                        } else if (try Token.take(self.reader, .symlink))
+                            continue :state .symlink
+                        else
+                            return error.InvalidToken;
+                    } else {
+                        try Token.expect(self.reader, .directory_entry_end);
+                        depth -= 1;
+                        if (depth == 0) return;
+                        continue :state .next;
+                    }
+                },
+            }
+            comptime unreachable;
+        }
+
+        /// Take the current entry's contents. If the entry is a file, stream the contents into
+        /// the writer.
+        pub fn take(self: *ReaderIterator, entry: Entry, writer: ?*std.Io.Writer) !Contents {
+            _ = .{ self, entry, writer };
+            unreachable; // TODO
+        }
+    };
+
     /// Returns the type of archive in the reader. Asserts the reader buffer is at least 80 bytes.
     pub fn peekType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
         const magic = Token.toString(.magic);
@@ -1230,7 +1353,8 @@ fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
     }
 }
 
-/// The tokens used to build Nix archive parsers. Tokens are combined as an implementation detail.
+/// The low-level tokens used to build Nix archives. As an implementation detail, some tokens are
+/// combined. For deserializing Nix archives, use `NixArchive.ReaderIterator` instead.
 pub const Token = enum {
     magic,
     archive_end,
