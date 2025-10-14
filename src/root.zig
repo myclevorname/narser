@@ -147,7 +147,7 @@ pub const NixArchive = struct {
     pub const UnpackIterator = struct {
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
-        names: std.MultiArrayList(struct {
+        names: std.ArrayList(struct {
             name: [std.fs.max_name_bytes]u8,
             len: Name,
         }),
@@ -221,8 +221,8 @@ pub const NixArchive = struct {
                 .directory => {
                     try self.names.ensureTotalCapacity(self.allocator, depth_hint orelse 16);
                     const first_name = self.names.addOneAssumeCapacity();
-                    self.names.items(.len)[first_name] = 0;
-                    std.debug.assert(first_name == 0);
+                    first_name.len = 0;
+                    std.debug.assert(first_name == &self.names.items[0]);
                     return .directory;
                 },
             }
@@ -231,9 +231,8 @@ pub const NixArchive = struct {
         /// Get the next entry within the current directory. `null` means leaving a directory.
         pub fn next(self: *UnpackIterator) !?Entry {
             if (try Token.take(self.reader, .directory_entry)) {
-                const slice = self.names.slice();
-                const buf = &slice.items(.name)[self.names.len - 1];
-                const len = &slice.items(.len)[self.names.len - 1];
+                const prev_buf = &self.names.items[self.names.items.len - 1];
+                const prev = prev_buf.name[0..prev_buf.len];
 
                 const next_name = try Token.takeName(self.reader);
 
@@ -245,13 +244,13 @@ pub const NixArchive = struct {
                     return error.MaliciousArchive;
                 }
 
-                switch (std.mem.order(u8, buf[0..len.*], next_name)) {
+                switch (std.mem.order(u8, prev, next_name)) {
                     .lt => {},
                     .eq => return error.DuplicateObjectName,
                     .gt => return error.WrongDirectoryOrder,
                 }
-                @memcpy(buf[0..next_name.len], next_name);
-                len.* = @intCast(next_name.len);
+                @memcpy(prev_buf.name[0..next_name.len], next_name);
+                prev_buf.len = @intCast(next_name.len);
 
                 try Token.expect(self.reader, .directory_entry_inner);
                 const kind: std.meta.Tag(Object.Data) = if (try Token.take(self.reader, .file))
@@ -264,10 +263,10 @@ pub const NixArchive = struct {
                     return error.InvalidToken;
                 return .{
                     .kind = kind,
-                    .name = buf[0..len.*],
+                    .name = prev_buf.name[0..next_name.len],
                 };
             } else {
-                if (self.names.len > 1) try Token.expect(self.reader, .directory_entry_end);
+                if (self.names.items.len > 1) try Token.expect(self.reader, .directory_entry_end);
                 _ = self.names.pop().?;
                 return null;
             }
@@ -275,7 +274,7 @@ pub const NixArchive = struct {
 
         /// Skip the current entry and its contents.
         pub fn skip(self: *UnpackIterator, entry: Entry) !void {
-            std.debug.assert(self.names.len != 0);
+            std.debug.assert(self.names.items.len != 0);
             const State = enum {
                 start,
                 file,
@@ -283,15 +282,15 @@ pub const NixArchive = struct {
                 next,
             };
 
-            const depth = self.names.len;
+            const depth = self.names.items.len;
 
             state: switch (State.start) {
                 .start => switch (entry.kind) {
                     .file => continue :state .file,
                     .symlink => continue :state .symlink,
                     .directory => {
-                        const i = try self.names.addOne(self.allocator);
-                        self.names.items(.len)[i] = 0;
+                        const child = try self.names.addOne(self.allocator);
+                        child.len = 0;
                         continue :state .next;
                     },
                 },
@@ -312,7 +311,7 @@ pub const NixArchive = struct {
                     continue :state .next;
                 },
                 .next => {
-                    if (self.names.len == depth) return;
+                    if (self.names.items.len == depth) return;
                     if (try self.next()) |e| {
                         switch (e.kind) {
                             .file => continue :state .file,
@@ -338,8 +337,8 @@ pub const NixArchive = struct {
         pub fn take(self: *UnpackIterator, entry: Entry, writer: ?*std.Io.Writer) !Contents {
             switch (entry.kind) {
                 .directory => {
-                    const i = try self.names.addOne(self.allocator);
-                    self.names.items(.len)[i] = 0;
+                    const child = try self.names.addOne(self.allocator);
+                    child.len = 0;
                     return .directory;
                 },
                 .file => {
@@ -370,7 +369,7 @@ pub const NixArchive = struct {
 
         /// Finish parsing the archive. This does not free the memory: call `.deinit` after.
         pub fn finish(self: *UnpackIterator) !void {
-            while (self.names.len != 0) {
+            while (self.names.items.len != 0) {
                 const entry = try self.next() orelse continue;
                 _ = try self.skip(entry);
             }

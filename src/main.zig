@@ -333,15 +333,15 @@ pub fn main() !void {
                 .directory => if (parts.items.len == 0)
                     return error.IsDir
                 else {
-                    std.debug.assert(try iter.first(null, null) == .directory);
+                    std.debug.assert(try iter.first(null, 1) == .directory);
                     level: for (0..parts.items.len) |i| {
                         while (try iter.next()) |e| {
                             //std.debug.print("found '{s}' (expecting '{s}')\n", .{ e.name, parts.items[i] });
                             switch (std.mem.order(u8, e.name, parts.items[i])) {
                                 .lt => {
-                                    const a = iter.names.len;
+                                    const a = iter.names.items.len;
                                     try iter.skip(e);
-                                    std.debug.assert(a == iter.names.len);
+                                    std.debug.assert(a == iter.names.items.len);
                                 },
                                 .eq => {
                                     if (i == parts.items.len - 1) {
