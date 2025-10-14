@@ -142,8 +142,7 @@ pub const NixArchive = struct {
         }
     };
 
-    /// A higher-level iterator built upon `Token`.
-    /// TODO: Come up with a better description
+    /// A higher-level directory entry-based iterator built upon `Token`.
     /// The reader's buffer must have at least `std.fs.max_path_bytes + 32` bytes.
     pub const UnpackIterator = struct {
         allocator: std.mem.Allocator,
@@ -388,7 +387,7 @@ pub const NixArchive = struct {
 
         if (magic.len + directory.len != 80) {
             @compileLog(magic.len + directory.len);
-            @compileError("archiveType doc comment needs updated");
+            @compileError("archiveType doc comment needs updated as well as the other instances of the magic number");
         }
 
         std.debug.assert(reader.buffer.len >= magic.len + directory.len);
@@ -1041,6 +1040,7 @@ pub const NixArchive = struct {
         try Token.write(writer, &.{.archive_end});
     }
 
+    /// The reader's buffer must have at least `std.fs.max_path_bytes + 32` bytes.
     pub fn unpackDirectory(
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
@@ -1143,6 +1143,7 @@ pub const NixArchive = struct {
     /// Reads a Nix archive containing a single file from the reader and writes it to the writer.
     /// Returns whether the file is executable. This is faster and more memory-efficient than calling
     /// `fromReader` followed by `pack`.
+    /// The reader's buffer must have at least `std.fs.max_path_bytes + 32` bytes.
     pub fn unpackFile(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
         var iter: UnpackIterator = .init(undefined, reader);
         //iter.deinit();
@@ -1153,6 +1154,7 @@ pub const NixArchive = struct {
 
     /// Reads a Nix archive containing a single symlink and returns the target. This is faster and
     /// more memory-efficient than calling `fromReader`.
+    /// The reader's buffer must have at least `std.fs.max_path_bytes + 32` bytes.
     pub fn unpackSymlink(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
         var iter: UnpackIterator = .init(undefined, reader);
         //iter.deinit();
