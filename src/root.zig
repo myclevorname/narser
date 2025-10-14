@@ -144,46 +144,139 @@ pub const NixArchive = struct {
 
     /// A higher-level iterator built upon `Token`.
     /// TODO: Come up with a better description
-    /// The reader's buffer must have at least `std.fs.max_path_bytes` bytes.
-    pub const ReaderIterator = struct {
+    /// The reader's buffer must have at least `std.fs.max_path_bytes + 32` bytes.
+    pub const UnpackIterator = struct {
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
         names: std.MultiArrayList(struct {
             name: [std.fs.max_name_bytes]u8,
             len: Name,
         }),
-        is_root_node: bool,
 
         pub const Entry = struct {
-            /// Invalidated upon `ReaderIterator.skip` or TODO.
+            /// Invalidated upon `.skip` or `.take`
             name: []const u8,
             kind: std.meta.Tag(Object.Data),
         };
 
         pub const Contents = union(std.meta.Tag(Object.Data)) {
             file: bool,
+            /// Invalidated upon `.skip` or `.take`
             symlink: []const u8,
             directory,
         };
 
-        pub fn init(allocator: std.mem.Allocator, reader: *std.Io.Reader) ReaderIterator {
-            std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
+        comptime {
+            if (Token.toString(.directory_entry_end).len != 32)
+                @compileError("UnpackIterator docs need updated");
+        }
+
+        pub fn init(allocator: std.mem.Allocator, reader: *std.Io.Reader) UnpackIterator {
+            std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes +
+                Token.toString(.directory_entry_end).len);
             return .{
                 .allocator = allocator,
                 .reader = reader,
                 .names = .empty,
-                .is_root_node = true,
             };
         }
 
-        pub fn deinit(self: *ReaderIterator) void {
+        pub fn deinit(self: *UnpackIterator) void {
             self.names.deinit(self.allocator);
             self.* = undefined;
         }
 
+        /// Get the contents of the root node. Depending on the type, the following will happen:
+        ///
+        /// `.file`: Stream the contents into the writer
+        /// `.directory`: Enter the directory
+        /// `.symlink`: Return the slice
+        pub fn first(self: *UnpackIterator, writer: ?*std.Io.Writer, depth_hint: ?usize) !Contents {
+            try Token.expect(self.reader, .magic);
+
+            const kind: std.meta.Tag(Object.Data) = if (try Token.take(self.reader, .file))
+                .file
+            else if (try Token.take(self.reader, .directory))
+                .directory
+            else if (try Token.take(self.reader, .symlink))
+                .symlink
+            else
+                return error.InvalidToken;
+
+            switch (kind) {
+                .file => {
+                    const is_executable = try Token.take(self.reader, .executable_file);
+                    try Token.expect(self.reader, .file_contents);
+
+                    const len = try self.reader.takeInt(u64, .little);
+                    try self.reader.streamExact64(writer.?, len);
+                    if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
+                        return error.InvalidPadding;
+
+                    return .{ .file = is_executable };
+                },
+                .symlink => {
+                    const target = try Token.takeTarget(self.reader);
+                    return .{ .symlink = target };
+                },
+                .directory => {
+                    try self.names.ensureTotalCapacity(self.allocator, depth_hint orelse 16);
+                    const first_name = self.names.addOneAssumeCapacity();
+                    self.names.items(.len)[first_name] = 0;
+                    std.debug.assert(first_name == 0);
+                    return .directory;
+                },
+            }
+        }
+
+        /// Get the next entry within the current directory. `null` means leaving a directory.
+        pub fn next(self: *UnpackIterator) !?Entry {
+            if (try Token.take(self.reader, .directory_entry)) {
+                const slice = self.names.slice();
+                const buf = &slice.items(.name)[self.names.len - 1];
+                const len = &slice.items(.len)[self.names.len - 1];
+
+                const next_name = try Token.takeName(self.reader);
+
+                if (std.mem.indexOfScalar(u8, next_name, 0) != null or
+                    std.mem.indexOfScalar(u8, next_name, '/') != null or
+                    std.mem.eql(u8, next_name, ".") or
+                    std.mem.eql(u8, next_name, ".."))
+                {
+                    return error.MaliciousArchive;
+                }
+
+                switch (std.mem.order(u8, buf[0..len.*], next_name)) {
+                    .lt => {},
+                    .eq => return error.DuplicateObjectName,
+                    .gt => return error.WrongDirectoryOrder,
+                }
+                @memcpy(buf[0..next_name.len], next_name);
+                len.* = @intCast(next_name.len);
+
+                try Token.expect(self.reader, .directory_entry_inner);
+                const kind: std.meta.Tag(Object.Data) = if (try Token.take(self.reader, .file))
+                    .file
+                else if (try Token.take(self.reader, .directory))
+                    .directory
+                else if (try Token.take(self.reader, .symlink))
+                    .symlink
+                else
+                    return error.InvalidToken;
+                return .{
+                    .kind = kind,
+                    .name = buf[0..len.*],
+                };
+            } else {
+                if (self.names.len > 1) try Token.expect(self.reader, .directory_entry_end);
+                _ = self.names.pop().?;
+                return null;
+            }
+        }
+
         /// Skip the current entry and its contents.
-        pub fn skip(self: *ReaderIterator, entry: Entry) !void {
-            std.debug.assert(!self.is_root_node);
+        pub fn skip(self: *UnpackIterator, entry: Entry) !void {
+            std.debug.assert(self.names.len != 0);
             const State = enum {
                 start,
                 file,
@@ -191,14 +284,13 @@ pub const NixArchive = struct {
                 next,
             };
 
-            var depth: u64 = 0;
+            const depth = self.names.len;
 
             state: switch (State.start) {
                 .start => switch (entry.kind) {
                     .file => continue :state .file,
                     .symlink => continue :state .symlink,
                     .directory => {
-                        depth += 1;
                         const i = try self.names.addOne(self.allocator);
                         self.names.items(.len)[i] = 0;
                         continue :state .next;
@@ -221,35 +313,17 @@ pub const NixArchive = struct {
                     continue :state .next;
                 },
                 .next => {
-                    if (try Token.take(self.reader, .directory_entry)) {
-                        const name = try Token.takeName(self.reader);
-                        const name_buf = &self.names.items(.name)[self.names.len - 1];
-                        const len = &self.names.items(.len)[self.names.len - 1];
-
-                        switch (std.mem.order(u8, name_buf[0..len.*], name)) {
-                            .lt => {},
-                            .eq => return error.DuplicateObjectName,
-                            .gt => return error.WrongDirectoryOrder,
+                    if (self.names.len == depth) return;
+                    if (try self.next()) |e| {
+                        switch (e.kind) {
+                            .file => continue :state .file,
+                            .symlink => continue :state .symlink,
+                            .directory => {
+                                std.debug.assert(try self.take(e, null) == .directory);
+                                continue :state .next;
+                            },
                         }
-
-                        @memcpy(name_buf[0..name.len], name);
-                        len.* = @intCast(name.len);
-
-                        if (try Token.take(self.reader, .file))
-                            continue :state .file
-                        else if (try Token.take(self.reader, .directory)) {
-                            depth += 1;
-                            const i = try self.names.addOne(self.allocator);
-                            self.names.items(.len)[i] = 0;
-                            continue :state .next;
-                        } else if (try Token.take(self.reader, .symlink))
-                            continue :state .symlink
-                        else
-                            return error.InvalidToken;
                     } else {
-                        try Token.expect(self.reader, .directory_entry_end);
-                        depth -= 1;
-                        if (depth == 0) return;
                         continue :state .next;
                     }
                 },
@@ -257,11 +331,51 @@ pub const NixArchive = struct {
             comptime unreachable;
         }
 
-        /// Take the current entry's contents. If the entry is a file, stream the contents into
-        /// the writer.
-        pub fn take(self: *ReaderIterator, entry: Entry, writer: ?*std.Io.Writer) !Contents {
-            _ = .{ self, entry, writer };
-            unreachable; // TODO
+        /// Take the current entry's contents. Depending on the entry, the following will happen:
+        ///
+        /// `.file`: Stream the contents into the writer
+        /// `.directory`: Enter the directory
+        /// `.symlink`: Return the slice
+        pub fn take(self: *UnpackIterator, entry: Entry, writer: ?*std.Io.Writer) !Contents {
+            switch (entry.kind) {
+                .directory => {
+                    const i = try self.names.addOne(self.allocator);
+                    self.names.items(.len)[i] = 0;
+                    return .directory;
+                },
+                .file => {
+                    const is_executable = try Token.take(self.reader, .executable_file);
+                    try Token.expect(self.reader, .file_contents);
+
+                    const len = try self.reader.takeInt(u64, .little);
+                    try self.reader.streamExact64(writer.?, len);
+                    if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
+                        return error.InvalidPadding;
+
+                    try Token.expect(self.reader, .directory_entry_end);
+
+                    return .{ .file = is_executable };
+                },
+                .symlink => {
+                    self.reader.fillMore() catch |e| switch (e) {
+                        error.EndOfStream => {},
+                        error.ReadFailed => return e,
+                    };
+                    // there must be enough space otherwise EOF will occur
+                    const target = try Token.takeTarget(self.reader);
+                    try Token.expect(self.reader, .directory_entry_end); // shouldn't rebase
+                    return .{ .symlink = target };
+                },
+            }
+        }
+
+        /// Finish parsing the archive. This does not free the memory: call `.deinit` after.
+        pub fn finish(self: *UnpackIterator) !void {
+            while (self.names.len != 0) {
+                const entry = try self.next() orelse continue;
+                _ = try self.skip(entry);
+            }
+            try Token.expect(self.reader, .archive_end);
         }
     };
 
@@ -935,137 +1049,91 @@ pub const NixArchive = struct {
     ) !void {
         std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
 
-        var currents: std.MultiArrayList(struct {
-            name_buf: [std.fs.max_name_bytes]u8 = undefined,
-            last_name_len: Name = 0,
-            dir: std.fs.Dir,
-        }) = .empty;
+        var currents: std.ArrayList(std.fs.Dir) = .empty;
         defer currents.deinit(allocator);
 
-        defer if (currents.len > 1) for (currents.items(.dir)[1..]) |*d| d.close();
+        defer if (currents.items.len > 1) for (currents.items[1..]) |*d| d.close();
 
-        try currents.append(allocator, .{ .dir = out_dir });
+        try currents.append(allocator, out_dir);
 
-        const State = enum { directory_entry, directory, file, symlink, end, leave_directory };
+        const State = enum { next, directory, file, symlink, end, leave_directory };
 
-        Token.expect(reader, .magic) catch |e| switch (e) {
-            error.InvalidToken => return error.NotANar,
-            error.ReadFailed => return error.ReadFailed,
-        };
+        var iter: UnpackIterator = .init(allocator, reader);
+        defer iter.deinit();
 
-        Token.expect(reader, .directory) catch |e| switch (e) {
-            error.InvalidToken => return error.WrongArchiveType,
-            error.ReadFailed => return error.ReadFailed,
-        };
+        std.debug.assert(try iter.first(null, null) == .directory); // TODO: depth_hint as arg
 
-        state: switch (State.directory_entry) {
-            .directory_entry => {
-                Token.expect(reader, .directory_entry) catch |e| switch (e) {
-                    error.InvalidToken => continue :state .leave_directory,
-                    else => return e,
-                };
+        var entry: UnpackIterator.Entry = undefined;
 
-                const name = try Token.takeName(reader);
+        state: switch (State.next) {
+            .next => {
+                entry = try iter.next() orelse continue :state .leave_directory;
 
-                if (std.mem.indexOfScalar(u8, name, 0) != null or
-                    std.mem.indexOfScalar(u8, name, '/') != null or
-                    std.mem.eql(u8, name, ".") or
-                    std.mem.eql(u8, name, ".."))
-                {
-                    return error.MaliciousArchive;
+                switch (entry.kind) {
+                    .file => continue :state .file,
+                    .directory => continue :state .directory,
+                    .symlink => continue :state .symlink,
                 }
-
-                const cur = currents.get(currents.len - 1);
-                switch (std.mem.order(u8, cur.name_buf[0..cur.last_name_len], name)) {
-                    .lt => {},
-                    .eq => return error.DuplicateObjectName,
-                    .gt => return error.WrongDirectoryOrder,
-                }
-
-                @memcpy(currents.items(.name_buf)[currents.len - 1][0..name.len], name);
-
-                currents.items(.last_name_len)[currents.len - 1] = @intCast(name.len);
-
-                try Token.expect(reader, .directory_entry_inner);
-
-                if (try Token.take(reader, .file))
-                    continue :state .file
-                else if (try Token.take(reader, .directory))
-                    continue :state .directory
-                else if (try Token.take(reader, .symlink))
-                    continue :state .symlink
-                else
-                    return error.InvalidToken;
             },
             .file => {
-                const is_executable = try Token.take(reader, .executable_file);
-                try Token.expect(reader, .file_contents);
+                const cur = &currents.items[currents.items.len - 1];
 
-                const size = try reader.takeInt(u64, .little);
-
-                const cur = currents.get(currents.len - 1);
-
-                var file = try cur.dir.createFile(
-                    cur.name_buf[0..cur.last_name_len],
-                    .{ .mode = if (is_executable) 0o777 else 0o666 },
-                );
+                var file = try cur.createFile(entry.name, .{});
                 defer file.close();
 
                 var fw = file.writer(file_out_buffer);
-                try reader.streamExact64(&fw.interface, size);
+
+                const is_executable = (try iter.take(entry, &fw.interface)).file;
                 try fw.interface.flush();
 
-                if (!std.mem.allEqual(u8, try reader.take(Token.padding(size)), 0))
-                    return error.InvalidToken;
+                if (is_executable) try file.chmod(try file.mode() | 0o111);
 
-                try Token.expect(reader, .directory_entry_end);
-
-                continue :state .directory_entry;
+                continue :state .next;
             },
             .symlink => {
-                const target = try Token.takeTarget(reader);
+                const target = (try iter.take(entry, null)).symlink;
 
-                const cur = currents.get(currents.len - 1);
+                const cur = &currents.items[currents.items.len - 1];
 
-                cur.dir.symLink(target, cur.name_buf[0..cur.last_name_len], .{}) catch |e| switch (e) {
-                    error.PathAlreadyExists => {},
+                cur.symLink(target, entry.name, .{}) catch |e| switch (e) {
+                    error.PathAlreadyExists => {
+                        var buf: [std.fs.max_path_bytes]u8 = undefined;
+                        if (cur.readLink(entry.name, &buf)) |_| {
+                            try cur.deleteTree(entry.name);
+                            try cur.symLink(target, entry.name, .{});
+                        } else |e2| return e2;
+                    },
                     else => return e,
                 };
 
-                try Token.expect(reader, .directory_entry_end);
-                continue :state .directory_entry;
+                continue :state .next;
             },
             .directory => {
-                const cur = currents.get(currents.len - 1);
-
-                const has_children = try Token.peek(reader, .directory_entry);
+                std.debug.assert(try iter.take(entry, null) == .directory);
+                const cur = &currents.items[currents.items.len - 1];
 
                 try currents.ensureUnusedCapacity(allocator, 1);
 
-                const child_name = cur.name_buf[0..cur.last_name_len];
-
-                cur.dir.makeDir(child_name) catch |e| switch (e) {
+                cur.makeDir(entry.name) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => return e,
                 };
-                if (has_children) {
-                    const child = try cur.dir.openDir(child_name, .{});
-                    currents.appendAssumeCapacity(.{ .dir = child });
-                } else try Token.expect(reader, .directory_entry_end);
-                continue :state .directory_entry;
+                const child = try cur.openDir(entry.name, .{});
+                currents.appendAssumeCapacity(child);
+                continue :state .next;
             },
             .leave_directory => {
-                if (currents.len == 1)
+                if (currents.items.len == 1)
                     continue :state .end
                 else {
-                    try Token.expect(reader, .directory_entry_end);
                     var cur = currents.pop().?;
-                    cur.dir.close();
-                    continue :state .directory_entry;
+                    cur.close();
+                    entry = undefined;
+                    continue :state .next;
                 }
             },
             .end => {
-                try Token.expect(reader, .archive_end);
+                try iter.finish();
                 return;
             },
         }
@@ -1076,259 +1144,22 @@ pub const NixArchive = struct {
     /// Returns whether the file is executable. This is faster and more memory-efficient than calling
     /// `fromReader` followed by `pack`.
     pub fn unpackFile(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
-        Token.expect(reader, .magic) catch |e| switch (e) {
-            error.InvalidToken => return error.NotANar,
-            error.ReadFailed => return e,
-        };
-
-        try Token.expect(reader, .file);
-
-        const exec_token = Token.toString(.executable_file);
-
-        const is_executable = if (std.mem.eql(u8, try reader.peek(exec_token.len), exec_token)) blk: {
-            reader.toss(exec_token.len);
-            break :blk true;
-        } else false;
-
-        try Token.expect(reader, .file_contents);
-
-        const size = try reader.takeInt(u64, .little);
-        try reader.streamExact64(writer, size);
-
-        if (!std.mem.allEqual(u8, try reader.take(Token.padding(size)), 0))
-            return error.InvalidToken;
-
-        try Token.expect(reader, .archive_end);
+        var iter: UnpackIterator = .init(undefined, reader);
+        //iter.deinit();
+        const is_executable = (try iter.first(writer, 0)).file;
+        try iter.finish();
         return is_executable;
     }
 
     /// Reads a Nix archive containing a single symlink and returns the target. This is faster and
     /// more memory-efficient than calling `fromReader`.
     pub fn unpackSymlink(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
-        Token.expect(reader, .magic) catch |e| switch (e) {
-            error.InvalidToken => return error.NotANar,
-            error.ReadFailed => return e,
-        };
-
-        try Token.expect(reader, .symlink);
-
-        const size = std.math.cast(Target, try reader.takeInt(u64, .little)) orelse
-            return error.NameTooLarge;
-        switch (size) {
-            0 => return error.NameTooSmall,
-            1...std.fs.max_path_bytes => {},
-            else => return error.NameTooLarge,
-        }
-
-        @memcpy(buffer[0..size], try reader.take(size));
-
-        if (!std.mem.allEqual(u8, try reader.take(Token.padding(size)), 0))
-            return error.InvalidToken;
-
-        try Token.expect(reader, .archive_end);
-        return buffer[0..size];
-    }
-
-    /// Pumps the contents of a file in the archive via a reader into the writer without fillowing
-    /// symlinks. Returns whether the file was executable. If you want to follow symlinks, use
-    /// `NixArchive.fromReader` followed by `subPath`. Asserts the reader's buffer contains at least
-    /// `@max(std.fs.max_name_bytes, std.fs.max_path_bytes)` bytes.
-    pub fn unpackSubFile(
-        allocator: std.mem.Allocator,
-        reader: *std.Io.Reader,
-        writer: *std.Io.Writer,
-        path: []const u8,
-    ) !bool {
-        std.debug.assert(reader.buffer.len >= @max(std.fs.max_path_bytes, std.fs.max_name_bytes));
-
-        var parts: std.ArrayList([]const u8) = .empty;
-        try parts.ensureTotalCapacity(allocator, 1 + std.mem.count(u8, path, "/"));
-        defer parts.deinit(allocator);
-
-        var names: std.MultiArrayList(struct { name: [std.fs.max_name_bytes]u8, len: Name }) = .empty;
-        try names.ensureTotalCapacity(allocator, 64);
-        defer names.deinit(allocator);
-
-        normalizePath(&parts, path);
-
-        var skip_depth: u64 = 0;
-
-        const State = enum {
-            start,
-            take_file,
-            take_directory,
-            skip_file,
-            skip_symlink,
-            skip_directory,
-            object_type_take,
-            object_type_skip,
-            entry_take,
-            entry_skip,
-            next_take,
-            next_skip,
-        };
-
-        state: switch (State.start) {
-            .start => {
-                Token.expect(reader, .magic) catch |e| switch (e) {
-                    error.InvalidToken => return error.NotANar,
-                    else => return e,
-                };
-
-                if (try Token.take(reader, .directory)) {
-                    if (parts.items.len == 0) return error.IsDir;
-                    names.appendAssumeCapacity(.{
-                        .name = undefined,
-                        .len = 0,
-                    });
-                    continue :state .entry_take;
-                } else if (try Token.take(reader, .file))
-                    continue :state if (parts.items.len == 0) .take_file else return error.Symlink
-                else if (try Token.take(reader, .symlink))
-                    return error.IsSymlink;
-                unreachable;
-            },
-            .object_type_skip => {
-                if (try Token.take(reader, .directory))
-                    continue :state .skip_directory
-                else if (try Token.take(reader, .file))
-                    continue :state .skip_file
-                else if (try Token.take(reader, .symlink))
-                    continue :state .skip_symlink
-                else
-                    return error.InvalidToken;
-            },
-            .take_file => {
-                const executable = try Token.take(reader, .executable_file);
-                try Token.expect(reader, .file_contents);
-                const len = try reader.takeInt(u64, .little);
-                try reader.streamExact64(writer, len);
-                return executable; // Skip processing the rest of the archive
-            },
-            .take_directory => {
-                if (names.len == parts.items.len) return error.IsDir;
-                names.appendAssumeCapacity(.{
-                    .name = undefined,
-                    .len = 0,
-                });
-                continue :state .entry_take;
-            },
-            .skip_file => {
-                _ = try Token.take(reader, .executable_file);
-                try Token.expect(reader, .file_contents);
-                const len = try reader.takeInt(u64, .little);
-                try reader.discardAll64(len);
-
-                if (!std.mem.allEqual(u8, try reader.take(Token.padding(len)), 0))
-                    return error.InvalidPadding;
-
-                continue :state if (skip_depth == 0) .next_take else .next_skip;
-            },
-            .skip_symlink => {
-                const len = try reader.takeInt(u64, .little);
-                if (len == 0) return error.TargetTooSmall;
-                if (len > std.fs.max_path_bytes) return error.TargetTooLarge;
-                try reader.discardAll64(len);
-
-                if (!std.mem.allEqual(u8, try reader.take(Token.padding(len)), 0))
-                    return error.InvalidPadding;
-
-                continue :state if (skip_depth == 0) .next_take else .next_skip;
-            },
-            .skip_directory => {
-                if (try Token.peek(reader, .directory_entry_end))
-                    continue :state if (skip_depth == 0) .next_take else .next_skip;
-
-                skip_depth += 1;
-
-                try names.append(allocator, .{
-                    .name = undefined,
-                    .len = 0,
-                });
-
-                continue :state .entry_skip;
-            },
-            .object_type_take => {
-                if (try Token.take(reader, .directory))
-                    continue :state .take_directory
-                else if (try Token.take(reader, .file))
-                    continue :state .take_file
-                else if (try Token.take(reader, .symlink))
-                    return error.Symlink;
-
-                return error.InvalidToken;
-            },
-            .entry_take => {
-                //std.debug.print("Taking.\n", .{});
-                if (names.len == 0 and try Token.peek(reader, .archive_end)) return error.NoSuchFile;
-                try Token.expect(reader, .directory_entry);
-
-                const name = try Token.takeName(reader);
-                //std.debug.print("name = {s}\n", .{name});
-
-                const name_bufs = names.items(.name);
-                const name_lens = names.items(.len);
-                const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
-
-                switch (std.mem.order(u8, prev, name)) {
-                    .lt => {},
-                    .eq => return error.DuplicateObjectName,
-                    .gt => return error.WrongDirectoryOrder,
-                }
-                @memcpy(name_bufs[names.len - 1][0..name.len], name);
-                name_lens[names.len - 1] = @intCast(name.len);
-
-                try Token.expect(reader, .directory_entry_inner);
-
-                switch (std.mem.order(u8, name, parts.items[names.len - 1])) {
-                    .lt => continue :state .object_type_skip,
-                    .eq => continue :state .object_type_take,
-                    .gt => return error.NoSuchFile,
-                }
-            },
-            .entry_skip => {
-                //std.debug.print("Skipping.\n", .{});
-                if (names.len == 0 and try Token.peek(reader, .archive_end)) return error.NoSuchFile;
-                try Token.expect(reader, .directory_entry);
-
-                const name = try Token.takeName(reader);
-                //std.debug.print("name = {s}, depth = {}\n", .{name, skip_depth});
-
-                const name_bufs = names.items(.name);
-                const name_lens = names.items(.len);
-                const prev = name_bufs[names.len - 1][0..name_lens[names.len - 1]];
-
-                switch (std.mem.order(u8, prev, name)) {
-                    .lt => {},
-                    .eq => return error.DuplicateObjectName,
-                    .gt => return error.WrongDirectoryOrder,
-                }
-                @memcpy(name_bufs[names.len - 1][0..name.len], name);
-                name_lens[names.len - 1] = @intCast(name.len);
-
-                try Token.expect(reader, .directory_entry_inner);
-
-                continue :state .object_type_skip;
-            },
-            .next_take => {
-                std.debug.assert(skip_depth == 0);
-                try Token.expect(reader, .directory_entry_end);
-                if (try Token.peek(reader, .directory_entry_end)) return error.NoSuchFile;
-                continue :state .entry_take;
-            },
-            .next_skip => {
-                std.debug.assert(skip_depth != 0);
-                try Token.expect(reader, .directory_entry_end);
-                while (try Token.take(reader, .directory_entry_end)) {
-                    _ = names.pop();
-                    skip_depth -= 1;
-                    if (skip_depth == 0) continue :state .entry_take;
-                }
-                continue :state .entry_skip;
-            },
-        }
-
-        comptime unreachable;
+        var iter: UnpackIterator = .init(undefined, reader);
+        //iter.deinit();
+        const target = (try iter.first(null, 0)).symlink;
+        @memcpy(buffer[0..target.len], target);
+        try iter.finish();
+        return buffer[0..target.len];
     }
 
     pub fn deinit(self: *NixArchive) void {
@@ -1338,7 +1169,7 @@ pub const NixArchive = struct {
 };
 
 /// The array list must reserve at least `1 + std.mem.count(u8, path, "/")` items
-fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
+pub fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
     var iter = std.mem.splitScalar(u8, path, '/');
 
     var cur: ?[]const u8 = iter.first();
@@ -1354,7 +1185,7 @@ fn normalizePath(out: *std.ArrayList([]const u8), path: []const u8) void {
 }
 
 /// The low-level tokens used to build Nix archives. As an implementation detail, some tokens are
-/// combined. For deserializing Nix archives, use `NixArchive.ReaderIterator` instead.
+/// combined. For deserializing Nix archives, use `NixArchive.UnpackIterator` instead.
 pub const Token = enum {
     magic,
     archive_end,
