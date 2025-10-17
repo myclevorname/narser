@@ -188,19 +188,15 @@ pub const NixArchive = struct {
         /// `.directory`: Enter the directory
         /// `.symlink`: Return the slice
         pub fn first(self: *UnpackIterator, writer: ?*std.Io.Writer, depth_hint: usize) !Contents {
-            try Token.expect(self.reader, .magic);
+            const kind = try peekType(self.reader);
 
-            const kind: std.meta.Tag(Object.Data) = if (try Token.take(self.reader, .file))
-                .file
-            else if (try Token.take(self.reader, .directory))
-                .directory
-            else if (try Token.take(self.reader, .symlink))
-                .symlink
-            else
-                return error.InvalidToken;
+            std.debug.assert((kind == .file) == (writer != null));
+
+            Token.expect(self.reader, .magic) catch unreachable;
 
             switch (kind) {
                 .file => {
+                    Token.expect(self.reader, .file) catch unreachable;
                     const is_executable = try Token.take(self.reader, .executable_file);
                     try Token.expect(self.reader, .file_contents);
 
@@ -212,10 +208,12 @@ pub const NixArchive = struct {
                     return .{ .file = is_executable };
                 },
                 .symlink => {
+                    Token.expect(self.reader, .symlink) catch unreachable;
                     const target = try Token.takeTarget(self.reader);
                     return .{ .symlink = target };
                 },
                 .directory => {
+                    Token.expect(self.reader, .directory) catch unreachable;
                     try self.names.ensureTotalCapacity(self.allocator, depth_hint);
                     const first_name = self.names.addOneAssumeCapacity();
                     first_name.len = 0;
@@ -332,6 +330,7 @@ pub const NixArchive = struct {
         /// `.directory`: Enter the directory
         /// `.symlink`: Return the slice
         pub fn take(self: *UnpackIterator, entry: Entry, writer: ?*std.Io.Writer) !Contents {
+            std.debug.assert((entry.kind == .file) == (writer != null));
             switch (entry.kind) {
                 .directory => {
                     const child = try self.names.addOne(self.allocator);
@@ -368,6 +367,13 @@ pub const NixArchive = struct {
         /// Asserts the current directory entry is a file.
         pub fn takeDiscarding(self: *UnpackIterator, entry: Entry) !struct { bool, u64 } {
             std.debug.assert(entry.kind == .file);
+            const ret = try self.firstDiscarding();
+
+            try Token.expect(self.reader, .directory_entry_end);
+            return ret;
+        }
+
+        pub fn firstDiscarding(self: *UnpackIterator) !struct { bool, u64 } {
             const is_executable = try Token.take(self.reader, .executable_file);
             try Token.expect(self.reader, .file_contents);
 
@@ -377,16 +383,15 @@ pub const NixArchive = struct {
             if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
                 return error.InvalidPadding;
 
-            try Token.expect(self.reader, .directory_entry_end);
             return .{ is_executable, len };
         }
 
         /// Finish parsing the archive. This does not free the memory: call `.deinit` after.
         pub fn finish(self: *UnpackIterator) !void {
             while (self.names.items.len != 0) {
-                const entry = try self.next() orelse continue;
-                _ = try self.skip(entry);
+                if (try self.next()) |e| _ = try self.skip(e);
             }
+
             try Token.expect(self.reader, .archive_end);
         }
     };
@@ -500,7 +505,7 @@ pub const NixArchive = struct {
                             .contents = aw.toOwnedSlice() catch unreachable,
                         } };
                     } else {
-                        const is_executable, const len = try iter.takeDiscarding(current_entry);
+                        const is_executable, const len = try iter.firstDiscarding();
                         current.data = .{ .file = .{
                             .is_executable = is_executable,
                             .contents = @as([*]u8, undefined)[0..len],
@@ -1067,7 +1072,7 @@ pub const NixArchive = struct {
         std.debug.assert(try iter.first(null, 1) == .directory); // TODO: depth_hint as arg
 
         var entry: UnpackIterator.Entry = undefined;
-        var entry_name_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var entry_name_buf: [std.fs.max_name_bytes]u8 = undefined;
 
         state: switch (State.next) {
             .next => {
@@ -1083,17 +1088,17 @@ pub const NixArchive = struct {
             },
             .file => {
                 const cur = &currents.items[currents.items.len - 1];
+                const is_executable = try Token.peek(iter.reader, .executable_file);
 
-                var file = try cur.createFile(entry.name, .{});
+                var file = try cur.createFile(entry.name, .{
+                    .mode = if (is_executable) 0o777 else 0o666,
+                });
                 defer file.close();
 
                 var fw = file.writer(file_out_buffer);
+                std.debug.assert((try iter.take(entry, &fw.interface)).file == is_executable);
 
-                const is_executable = (try iter.take(entry, &fw.interface)).file;
                 try fw.interface.flush();
-
-                const mode = try file.mode();
-                try file.chmod(if (is_executable) mode | 0o111 else mode & 0o666);
 
                 continue :state .next;
             },
@@ -1140,6 +1145,7 @@ pub const NixArchive = struct {
                 }
             },
             .end => {
+                std.debug.assert(iter.names.items.len == 0);
                 try iter.finish();
                 return;
             },
