@@ -2,6 +2,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    zig2nix.url = "github:Cloudef/zig2nix";
   };
 
   outputs =
@@ -9,13 +10,13 @@
       self,
       nixpkgs,
       flake-utils,
-      ...
-    }@inputs:
+      zig2nix,
+    }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        zig = pkgs.zig_0_15;
+        zig = zig2nix.packages.${system}.zig-master;
       in
       {
         formatter = pkgs.nixfmt-tree;
