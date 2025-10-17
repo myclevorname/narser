@@ -4,4 +4,6 @@ result*
 format
 
 # my test subject
-/linux
+linux
+linux.nar
+build-benchees.sh
