@@ -1052,8 +1052,6 @@ pub const NixArchive = struct {
         out_dir: std.fs.Dir,
         file_out_buffer: []u8,
     ) !void {
-        std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes);
-
         var currents: std.ArrayList(std.fs.Dir) = .empty;
         defer currents.deinit(allocator);
 
@@ -1069,10 +1067,13 @@ pub const NixArchive = struct {
         std.debug.assert(try iter.first(null, 1) == .directory); // TODO: depth_hint as arg
 
         var entry: UnpackIterator.Entry = undefined;
+        var entry_name_buf: [std.fs.max_path_bytes]u8 = undefined;
 
         state: switch (State.next) {
             .next => {
                 entry = try iter.next() orelse continue :state .leave_directory;
+                @memcpy(entry_name_buf[0..entry.name.len], entry.name);
+                entry.name.ptr = &entry_name_buf;
 
                 switch (entry.kind) {
                     .file => continue :state .file,
@@ -1091,7 +1092,8 @@ pub const NixArchive = struct {
                 const is_executable = (try iter.take(entry, &fw.interface)).file;
                 try fw.interface.flush();
 
-                if (is_executable) try file.chmod(try file.mode() | 0o111);
+                const mode = try file.mode();
+                try file.chmod(if (is_executable) mode | 0o111 else mode & 0o666);
 
                 continue :state .next;
             },
