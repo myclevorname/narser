@@ -11,7 +11,7 @@ Narser does not and will not support Nix's case-hacking on MacOS.
 
 ## Building
 
-Narser targets the latest Zig version: 0.15.1.
+Narser targets 0.15.1 as there is a huge performance regression in `narser hash` in 0.15.2.
 
 For release builds, Nix is used.
 The `fast` and `small` packages have little to no benefit and are only included for completeness.

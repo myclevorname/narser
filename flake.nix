@@ -2,6 +2,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    zig-src = {
+      url = "github:ziglang/zig";
+      flake = false;
+    };
   };
 
   outputs =
@@ -9,13 +13,20 @@
       self,
       nixpkgs,
       flake-utils,
-      ...
-    }@inputs:
+      zig-src,
+    }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        zig = pkgs.zig_0_15;
+        zig = (pkgs.callPackage (nixpkgs + "/pkgs/development/compilers/zig/generic.nix") {
+          version = "0.16.0";
+          hash = "";
+          llvmPackages = pkgs.llvmPackages_21;
+        }).overrideAttrs {
+          version = "0.16.0-unstable";
+          src = zig-src;
+        };
       in
       {
         formatter = pkgs.nixfmt-tree;
