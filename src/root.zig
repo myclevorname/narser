@@ -914,7 +914,7 @@ pub const NixArchive = struct {
                         },
                     });
                 }
-                nodes.sortSpanUnstable(dir_indicies.getLast(), nodes.len, struct {
+                nodes.sortSpan(dir_indicies.getLast(), nodes.len, struct {
                     names: []const []const u8,
 
                     pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
