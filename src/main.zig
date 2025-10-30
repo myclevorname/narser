@@ -181,9 +181,12 @@ const OptsIter = struct {
 };
 
 pub fn main() !void {
-    const stdout = std.fs.File.stdout();
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+
+    const stdout = std.Io.File.stdout();
     var stdout_buffer: [4096 * 64]u8 = undefined;
-    var fw = stdout.writer(&stdout_buffer);
+    var fw = std.fs.File.adaptFromNewApi(stdout).writer(&stdout_buffer);
     var writer = &fw.interface;
 
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -238,7 +241,7 @@ pub fn main() !void {
         var in_buf: [8192]u8 = undefined;
 
         if (std.mem.eql(u8, "-", argument)) {
-            var fr = std.fs.File.stdin().reader(&in_buf);
+            var fr = std.Io.File.stdin().reader(io, &in_buf);
             try narser.NixArchive.packFile(
                 allocator,
                 &fr.interface,
@@ -247,32 +250,32 @@ pub fn main() !void {
                 fr.getSize() catch null,
             );
         } else {
-            var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const stat = try std.Io.Dir.cwd().statPath(io, argument, .{ .follow_symlinks = false });
+            switch (stat.kind) {
+                .sym_link => {
+                    var symlink_buffer: [std.fs.max_path_bytes]u8 = undefined;
 
-            if (std.fs.cwd().readLink(argument, &symlink_buffer)) |target| {
-                try narser.NixArchive.packSymlink(target, used_writer);
-            } else |_| {
-                const stat = try std.fs.cwd().statFile(argument);
-                switch (stat.kind) {
-                    .sym_link => fatal("Failed to read the symlink target", .{}),
-                    .directory => {
-                        var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
-                        defer dir.close();
-                        try narser.NixArchive.packDirectory(allocator, dir, used_writer);
-                    },
-                    else => {
-                        var file = try std.fs.cwd().openFile(argument, .{});
-                        defer file.close();
-                        var fr = file.reader(&in_buf);
-                        try narser.NixArchive.packFile(
-                            allocator,
-                            &fr.interface,
-                            used_writer,
-                            stat.mode & 0o111 != 0,
-                            fr.getSize() catch null,
-                        );
-                    },
-                }
+                    const target = try std.fs.Dir.adaptFromNewApi(std.Io.Dir.cwd())
+                        .readLink(argument, &symlink_buffer);
+                    try narser.NixArchive.packSymlink(target, used_writer);
+                },
+                .directory => {
+                    var dir = try std.Io.Dir.cwd().openDir(io, argument, .{ .iterate = true });
+                    defer dir.close(io);
+                    try narser.NixArchive.packDirectory(allocator, io, dir, used_writer);
+                },
+                else => {
+                    var file = try std.Io.Dir.cwd().openFile(io, argument, .{});
+                    defer file.close(io);
+                    var fr = file.reader(io, &in_buf);
+                    try narser.NixArchive.packFile(
+                        allocator,
+                        &fr.interface,
+                        used_writer,
+                        stat.mode & 0o111 != 0,
+                        fr.getSize() catch null,
+                    );
+                },
             }
         }
 
@@ -285,11 +288,11 @@ pub fn main() !void {
         var argument = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", argument)) argument = "/dev/fd/0";
 
-        var in_file = try std.fs.cwd().openFile(argument, .{});
-        defer in_file.close();
+        var in_file = try std.Io.Dir.cwd().openFile(io, argument, .{});
+        defer in_file.close(io);
 
         var in_buf: [8192]u8 = undefined;
-        var in_reader = in_file.reader(&in_buf);
+        var in_reader = in_file.reader(io, &in_buf);
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
@@ -309,11 +312,11 @@ pub fn main() !void {
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
-        var in_file = try std.fs.cwd().openFile(archive_path, .{});
-        defer in_file.close();
+        var in_file = try std.Io.Dir.cwd().openFile(io, archive_path, .{});
+        defer in_file.close(io);
 
         var in_buf: [8192]u8 = undefined;
-        var in_reader = in_file.reader(&in_buf);
+        var in_reader = in_file.reader(io, &in_buf);
 
         if (!opts.follow) {
             var iter: narser.NixArchive.UnpackIterator = .init(allocator, &in_reader.interface);
@@ -390,10 +393,10 @@ pub fn main() !void {
         var archive_path = if (processed_args.items.len < 2) "-" else processed_args.items[1];
         if (std.mem.eql(u8, "-", archive_path)) archive_path = "/dev/fd/0";
 
-        var file = try std.fs.cwd().openFile(archive_path, .{});
-        defer file.close();
+        var file = try std.Io.Dir.cwd().openFile(io, archive_path, .{});
+        defer file.close(io);
         var fbuf: [4096 * 64]u8 = undefined;
-        var fr = file.reader(&fbuf);
+        var fr = file.reader(io, &fbuf);
         const reader = &fr.interface;
 
         const kind = narser.NixArchive.peekType(reader) catch |e| switch (e) {
@@ -405,24 +408,24 @@ pub fn main() !void {
 
         switch (kind) {
             .directory => {
-                var dir = try std.fs.cwd().makeOpenPath(target_path orelse ".", .{});
-                defer dir.close();
+                var dir = try std.Io.Dir.cwd().makeOpenPath(io, target_path orelse ".", .{});
+                defer dir.close(io);
                 var fw_buf: [4096 * 8]u8 = undefined;
-                try narser.NixArchive.unpackDirectory(allocator, reader, dir, &fw_buf);
+                try narser.NixArchive.unpackDirectory(allocator, io, reader, dir, &fw_buf);
             },
             .file => if (target_path == null or std.mem.eql(u8, "-", target_path.?)) {
                 _ = try narser.NixArchive.unpackFile(reader, writer);
             } else {
-                var out = try std.fs.cwd().createFile(target_path.?, .{});
-                defer out.close();
-                var w = out.writer(&.{});
+                var out = try std.Io.Dir.cwd().createFile(io, target_path.?, .{});
+                defer out.close(io);
+                var w = std.fs.File.adaptFromNewApi(out).writer(&.{});
 
                 const exec = try narser.NixArchive.unpackFile(reader, &w.interface);
-                try file.chmod(if (exec) 0o777 else 0o666);
+                try std.fs.File.adaptFromNewApi(file).chmod(if (exec) 0o777 else 0o666);
             },
             .symlink => if (target_path) |path| {
                 var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-                try std.fs.cwd().symLink(
+                try std.fs.Dir.adaptFromNewApi(std.Io.Dir.cwd()).symLink(
                     try narser.NixArchive.unpackSymlink(reader, &path_buf),
                     path,
                     .{},

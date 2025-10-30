@@ -635,7 +635,7 @@ pub const NixArchive = struct {
 
     /// Converts the contents of a directory into a Nix archive. The directory passed must be
     /// opened with iteration capabilities.
-    pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NixArchive {
+    pub fn fromDirectory(allocator: std.mem.Allocator, io: std.Io, root: std.Io.Dir) !NixArchive {
         var self: NixArchive = .{
             .arena = .init(allocator),
             .pool = undefined,
@@ -663,7 +663,7 @@ pub const NixArchive = struct {
         var iters: std.ArrayListUnmanaged(Iterator) = .initBuffer(&iters_buf);
 
         iters.appendAssumeCapacity(.{
-            .iterator = root.iterate(),
+            .iterator = std.fs.Dir.adaptFromNewApi(root).iterate(),
             .object = root_node,
         });
 
@@ -682,9 +682,9 @@ pub const NixArchive = struct {
                 switch (e.kind) {
                     .directory => {
                         next.*.data = .{ .directory = null };
-                        var child = try cur.iterator.dir.openDir(e.name, .{ .iterate = true });
+                        const child = try cur.iterator.dir.adaptToNewApi().openDir(io, e.name, .{ .iterate = true });
                         iters.appendBounded(.{
-                            .iterator = child.iterate(),
+                            .iterator = std.fs.Dir.adaptFromNewApi(child).iterate(),
                             .object = next,
                         }) catch return error.NestedTooDeep;
                     },
@@ -697,12 +697,12 @@ pub const NixArchive = struct {
                     else => {
                         next.*.data = .{ .file = undefined };
 
-                        var file = try cur.iterator.dir.openFile(e.name, .{});
-                        defer file.close();
+                        var file = (try cur.iterator.dir.adaptToNewApi().openFile(io, e.name, .{}));
+                        defer file.close(io);
 
-                        const stat = try file.stat();
+                        const stat = try file.stat(io);
 
-                        var fr = file.reader(&.{});
+                        var fr = file.reader(io, &.{});
 
                         var aw: std.Io.Writer.Allocating = .init(self.arena.allocator());
                         while (try fr.interface.streamRemaining(&aw.writer) != 0) {}
@@ -818,12 +818,12 @@ pub const NixArchive = struct {
     }
 
     /// Unpacks a Nix archive into a directory.
-    pub fn toDirectory(self: NixArchive, target_dir: std.fs.Dir) !void {
+    pub fn toDirectory(self: NixArchive, io: std.Io, target_dir: std.Io.Dir) !void {
         if (self.root.data.directory == null) return;
 
-        var item_buf: [256]std.fs.Dir = undefined;
-        var items: std.ArrayListUnmanaged(std.fs.Dir) = .initBuffer(&item_buf);
-        defer if (items.items.len > 1) for (items.items[1..]) |*dir| dir.close();
+        var item_buf: [256]std.Io.Dir = undefined;
+        var items: std.ArrayListUnmanaged(std.Io.Dir) = .initBuffer(&item_buf);
+        defer if (items.items.len > 1) for (items.items[1..]) |*dir| dir.close(io);
         items.appendAssumeCapacity(target_dir);
 
         var current_node = self.root.data.directory.?;
@@ -839,15 +839,15 @@ pub const NixArchive = struct {
                 return error.MaliciousArchive;
             switch (current_node.data) {
                 .file => |metadata| {
-                    try cwd.writeFile(.{
+                    try std.fs.Dir.adaptFromNewApi(cwd).writeFile(.{
                         .sub_path = current_node.entry.?.name,
                         .data = metadata.contents,
                         .flags = .{ .mode = if (metadata.is_executable) 0o777 else 0o666 },
                     });
                 },
                 .symlink => |target| {
-                    cwd.deleteFile(current_node.entry.?.name) catch {};
-                    try cwd.symLink(target, current_node.entry.?.name, .{});
+                    std.fs.Dir.adaptFromNewApi(cwd).deleteFile(current_node.entry.?.name) catch {};
+                    try std.fs.Dir.adaptFromNewApi(cwd).symLink(target, current_node.entry.?.name, .{});
                 },
                 .directory => |child| {
                     if (std.mem.eql(u8, current_node.entry.?.name, "..") or
@@ -857,12 +857,12 @@ pub const NixArchive = struct {
                         return error.MaliciousArchive;
                     if (std.mem.indexOfScalar(u8, current_node.entry.?.name, 0) != null)
                         return error.MaliciousArchive;
-                    try cwd.makeDir(current_node.entry.?.name);
+                    try cwd.makeDir(io, current_node.entry.?.name);
                     if (child) |node| {
                         const next = items.addOneBounded() catch return error.NestedTooDeep;
                         errdefer _ = items.pop().?;
 
-                        next.* = try cwd.openDir(current_node.entry.?.name, .{});
+                        next.* = try cwd.openDir(io, current_node.entry.?.name, .{});
                         current_node = node;
                         continue;
                     }
@@ -871,7 +871,7 @@ pub const NixArchive = struct {
             while ((current_node.entry orelse return).next == null) {
                 current_node = current_node.entry.?.parent;
                 var dir = items.pop().?;
-                if (current_node.entry != null) dir.close();
+                if (current_node.entry != null) dir.close(io);
             }
             current_node = current_node.entry.?.next.?;
         }
@@ -881,7 +881,8 @@ pub const NixArchive = struct {
     /// memory-efficient than calling `fromDirectory` followed by `pack`.
     pub fn packDirectory(
         allocator: std.mem.Allocator,
-        dir: std.fs.Dir,
+        io: std.Io,
+        dir: std.Io.Dir,
         writer: *std.Io.Writer,
     ) !void {
         // Idea: Make a list of nodes sorted by least depth to most depth, followed by names sorted
@@ -910,7 +911,7 @@ pub const NixArchive = struct {
 
         try dir_indicies.ensureUnusedCapacity(allocator, 16);
 
-        dirs.appendAssumeCapacity(dir.iterate());
+        dirs.appendAssumeCapacity(std.fs.Dir.adaptFromNewApi(dir).iterate());
 
         const Scan = enum { scan_directory, print };
 
@@ -960,19 +961,19 @@ pub const NixArchive = struct {
                         .directory => {
                             try Token.write(writer, &.{.directory});
                             try dirs.ensureUnusedCapacity(allocator, 1);
-                            const d = try dirs.getLast().dir.openDir(name, .{ .iterate = true });
-                            dirs.appendAssumeCapacity(d.iterateAssumeFirstIteration());
+                            const d = try dirs.getLast().dir.adaptToNewApi().openDir(io, name, .{ .iterate = true });
+                            dirs.appendAssumeCapacity(std.fs.Dir.adaptFromNewApi(d).iterateAssumeFirstIteration());
                             continue :loop .scan_directory;
                         },
                         .file => {
                             try Token.write(writer, &.{.file});
-                            var file = try dirs.getLast().dir.openFile(name, .{});
-                            defer file.close();
-                            if (try file.mode() & 0o111 != 0)
+                            var file = try dirs.getLast().dir.adaptToNewApi().openFile(io, name, .{});
+                            defer file.close(io);
+                            if ((try file.stat(io)).mode & 0o111 != 0)
                                 try Token.write(writer, &.{.executable_file});
                             try Token.write(writer, &.{.file_contents});
 
-                            var fr = file.reader(&.{});
+                            var fr = file.reader(io, &.{});
 
                             if (fr.getSize()) |size| {
                                 try writer.writeInt(u64, size, .little);
@@ -1073,14 +1074,15 @@ pub const NixArchive = struct {
     /// Asserts the reader's buffer holds at `NixArchive.min_buffer_size` bytes.
     pub fn unpackDirectory(
         allocator: std.mem.Allocator,
+        io: std.Io,
         reader: *std.Io.Reader,
-        out_dir: std.fs.Dir,
+        out_dir: std.Io.Dir,
         file_out_buffer: []u8,
     ) !void {
-        var currents: std.ArrayList(std.fs.Dir) = .empty;
+        var currents: std.ArrayList(std.Io.Dir) = .empty;
         defer currents.deinit(allocator);
 
-        defer if (currents.items.len > 1) for (currents.items[1..]) |*d| d.close();
+        defer if (currents.items.len > 1) for (currents.items[1..]) |*d| d.close(io);
 
         try currents.append(allocator, out_dir);
 
@@ -1106,12 +1108,12 @@ pub const NixArchive = struct {
                 const cur = &currents.items[currents.items.len - 1];
                 const is_executable = try Token.peek(iter.reader, .executable_file);
 
-                var file = try cur.createFile(entry.name, .{
+                var file = try cur.createFile(io, entry.name, .{
                     .mode = if (is_executable) 0o777 else 0o666,
                 });
-                defer file.close();
+                defer file.close(io);
 
-                var fw = file.writer(file_out_buffer);
+                var fw = std.fs.File.adaptFromNewApi(file).writer(file_out_buffer);
                 std.debug.assert((try iter.take(entry, &fw.interface)).file == is_executable);
 
                 try fw.interface.flush();
@@ -1123,12 +1125,12 @@ pub const NixArchive = struct {
 
                 const cur = &currents.items[currents.items.len - 1];
 
-                cur.symLink(target, entry.name, .{}) catch |e| switch (e) {
+                std.fs.Dir.adaptFromNewApi(cur.*).symLink(target, entry.name, .{}) catch |e| switch (e) {
                     error.PathAlreadyExists => {
                         var buf: [std.fs.max_path_bytes]u8 = undefined;
-                        if (cur.readLink(entry.name, &buf)) |_| {
-                            try cur.deleteTree(entry.name);
-                            try cur.symLink(target, entry.name, .{});
+                        if (std.fs.Dir.adaptFromNewApi(cur.*).readLink(entry.name, &buf)) |_| {
+                            try std.fs.Dir.adaptFromNewApi(cur.*).deleteTree(entry.name);
+                            try std.fs.Dir.adaptFromNewApi(cur.*).symLink(target, entry.name, .{});
                         } else |e2| return e2;
                     },
                     else => return e,
@@ -1142,11 +1144,11 @@ pub const NixArchive = struct {
 
                 try currents.ensureUnusedCapacity(allocator, 1);
 
-                cur.makeDir(entry.name) catch |e| switch (e) {
+                cur.makeDir(io, entry.name) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => return e,
                 };
-                const child = try cur.openDir(entry.name, .{});
+                const child = try cur.openDir(io, entry.name, .{});
                 currents.appendAssumeCapacity(child);
                 continue :state .next;
             },
@@ -1155,7 +1157,7 @@ pub const NixArchive = struct {
                     continue :state .end
                 else {
                     var cur = currents.pop().?;
-                    cur.close();
+                    cur.close(io);
                     entry = undefined;
                     continue :state .next;
                 }
@@ -1426,11 +1428,12 @@ test "a symlink" {
 
 test "nar from dir-and-files" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
-    var root = try std.fs.cwd().openDir(tests_path ++ "/dir-and-files", .{ .iterate = true });
-    defer root.close();
+    var root = try std.Io.Dir.cwd().openDir(io, tests_path ++ "/dir-and-files", .{ .iterate = true });
+    defer root.close(io);
 
-    var data = try NixArchive.fromDirectory(allocator, root);
+    var data = try NixArchive.fromDirectory(allocator, io, root);
     defer data.deinit();
 
     const dir = data.root.data.directory.?;
@@ -1456,13 +1459,14 @@ test "nar from dir-and-files" {
 
 test "empty directory" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
-    std.fs.cwd().makeDir(tests_path ++ "/empty") catch {};
+    std.Io.Dir.cwd().makeDir(io, tests_path ++ "/empty") catch {};
 
-    var root = try std.fs.cwd().openDir(tests_path ++ "/empty", .{ .iterate = true });
-    defer root.close();
+    var root = try std.Io.Dir.cwd().openDir(io, tests_path ++ "/empty", .{ .iterate = true });
+    defer root.close(io);
 
-    var data = try NixArchive.fromDirectory(allocator, root);
+    var data = try NixArchive.fromDirectory(allocator, io, root);
     defer data.deinit();
 
     try std.testing.expectEqual(null, data.root.data.directory);
@@ -1489,11 +1493,12 @@ test "nar to directory to nar" {
 
 test "more complex" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     std.fs.cwd().makeDir(tests_path ++ "/complex/empty") catch {};
 
-    var root = try std.fs.cwd().openDir(tests_path ++ "/complex", .{ .iterate = true });
-    defer root.close();
+    var root = try std.Io.Dir.cwd().openDir(io, tests_path ++ "/complex", .{ .iterate = true });
+    defer root.close(io);
 
     const expected = @embedFile("tests/complex.nar") ** 3 ++
         @embedFile("tests/complex_empty.nar") ** 2;
@@ -1503,9 +1508,9 @@ test "more complex" {
     const writer = &fixed;
 
     {
-        try NixArchive.packDirectory(allocator, root, writer);
+        try NixArchive.packDirectory(allocator, io, root, writer);
 
-        var archive = try NixArchive.fromDirectory(allocator, root);
+        var archive = try NixArchive.fromDirectory(allocator, io, root);
         defer archive.deinit();
 
         try archive.toWriter(writer);
@@ -1518,12 +1523,12 @@ test "more complex" {
         try other_archive.toWriter(writer);
     }
     {
-        var empty = try root.openDir("empty", .{ .iterate = true });
-        defer empty.close();
+        var empty = try root.openDir(io, "empty", .{ .iterate = true });
+        defer empty.close(io);
 
-        try NixArchive.packDirectory(allocator, empty, writer);
+        try NixArchive.packDirectory(allocator, io, empty, writer);
 
-        var archive = try NixArchive.fromDirectory(allocator, empty);
+        var archive = try NixArchive.fromDirectory(allocator, io, empty);
         defer archive.deinit();
 
         try archive.toWriter(writer);
