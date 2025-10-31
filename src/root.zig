@@ -20,7 +20,15 @@ pub const NixArchive = struct {
     root: *Object,
     name_pool: std.heap.MemoryPool([std.fs.max_name_bytes]u8),
 
-    pub const min_buffer_size = std.fs.max_path_bytes + Token.toString(.directory_entry_end).len;
+    pub const min_buffer_size = @max(
+        @max(std.fs.max_path_bytes, std.fs.max_name_bytes) +
+            Token.toString(.directory_entry_end).len,
+        Token.toString(.magic).len + @max(
+            Token.toString(.directory).len,
+            Token.toString(.file).len,
+            Token.toString(.symlink).len,
+        ),
+    );
 
     pub const Object = struct {
         /// null iff the root of the archive
@@ -185,7 +193,7 @@ pub const NixArchive = struct {
         /// Get the contents of the root node. Depending on the type, the following will happen:
         ///
         /// `.file`: Stream the contents into the writer
-        /// `.directory`: Enter the directory
+        /// `.directory`: Enter the directory, asserting `depth_hint` is nonzero.
         /// `.symlink`: Return the slice
         pub fn first(self: *UnpackIterator, writer: ?*std.Io.Writer, depth_hint: usize) !Contents {
             const kind = try peekType(self.reader);
@@ -213,6 +221,7 @@ pub const NixArchive = struct {
                     return .{ .symlink = target };
                 },
                 .directory => {
+                    std.debug.assert(depth_hint > 0);
                     Token.expect(self.reader, .directory) catch unreachable;
                     try self.names.ensureTotalCapacity(self.allocator, depth_hint);
                     const first_name = self.names.addOneAssumeCapacity();
@@ -224,8 +233,12 @@ pub const NixArchive = struct {
         }
 
         /// Get the next entry within the current directory. `null` means leaving a directory.
+        /// Name invalidated upon calling `next` or `finish`.
         pub fn next(self: *UnpackIterator) !?Entry {
             if (try Token.take(self.reader, .directory_entry)) {
+                // We may return a directory, in which case self.names may reallocate.
+                try self.names.ensureUnusedCapacity(self.allocator, 1);
+
                 const prev_buf = &self.names.items[self.names.items.len - 1];
                 const prev = prev_buf.name[0..prev_buf.len];
 
@@ -267,7 +280,7 @@ pub const NixArchive = struct {
             }
         }
 
-        /// Skip the current entry and its contents.
+        /// Skip the current entry and its contents, invalidating the entry.
         pub fn skip(self: *UnpackIterator, entry: Entry) !void {
             std.debug.assert(self.names.items.len != 0);
             const State = enum {
@@ -333,7 +346,7 @@ pub const NixArchive = struct {
             std.debug.assert((entry.kind == .file) == (writer != null));
             switch (entry.kind) {
                 .directory => {
-                    const child = try self.names.addOne(self.allocator);
+                    const child = self.names.addOneAssumeCapacity();
                     child.len = 0;
                     return .directory;
                 },
@@ -374,6 +387,11 @@ pub const NixArchive = struct {
         }
 
         pub fn firstDiscarding(self: *UnpackIterator) !struct { bool, u64 } {
+            std.debug.assert(try peekType(self.reader) == .file);
+
+            Token.expect(self.reader, .magic) catch unreachable;
+            Token.expect(self.reader, .file) catch unreachable;
+
             const is_executable = try Token.take(self.reader, .executable_file);
             try Token.expect(self.reader, .file_contents);
 
@@ -396,17 +414,13 @@ pub const NixArchive = struct {
         }
     };
 
-    /// Returns the type of archive in the reader. Asserts the reader buffer is at least 80 bytes.
+    /// Returns the type of archive in the reader. Asserts the reader buffer holds at least
+    /// `NixArchive.min_buffer_size` bytes.
     pub fn peekType(reader: *std.Io.Reader) !std.meta.Tag(Object.Data) {
         const magic = Token.toString(.magic);
         const file = Token.toString(.file);
         const directory = Token.toString(.directory);
         const symlink = Token.toString(.symlink);
-
-        if (magic.len + directory.len != 80) {
-            @compileLog(magic.len + directory.len);
-            @compileError("archiveType doc comment needs updated as well as the other instances of the magic number");
-        }
 
         std.debug.assert(reader.buffer.len >= magic.len + directory.len);
 
@@ -452,7 +466,7 @@ pub const NixArchive = struct {
     };
 
     /// Returns a Nix archive from the given reader. Data after the end of the archive is not read.
-    /// The reader's buffer must have at least `NixArchive.min_buffer_size` bytes.
+    /// Asserts the reader's buffer holds at `NixArchive.min_buffer_size` bytes.
     pub fn fromReader(
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
@@ -1050,7 +1064,7 @@ pub const NixArchive = struct {
         try Token.write(writer, &.{.archive_end});
     }
 
-    /// The reader's buffer must have at least `NixArchive.min_buffer_size` bytes.
+    /// Asserts the reader's buffer holds at `NixArchive.min_buffer_size` bytes.
     pub fn unpackDirectory(
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
@@ -1072,14 +1086,10 @@ pub const NixArchive = struct {
         std.debug.assert(try iter.first(null, 1) == .directory); // TODO: depth_hint as arg
 
         var entry: UnpackIterator.Entry = undefined;
-        var entry_name_buf: [std.fs.max_name_bytes]u8 = undefined;
 
         state: switch (State.next) {
             .next => {
                 entry = try iter.next() orelse continue :state .leave_directory;
-                @memcpy(entry_name_buf[0..entry.name.len], entry.name);
-                entry.name.ptr = &entry_name_buf;
-
                 switch (entry.kind) {
                     .file => continue :state .file,
                     .directory => continue :state .directory,
@@ -1156,7 +1166,7 @@ pub const NixArchive = struct {
     /// Reads a Nix archive containing a single file from the reader and writes it to the writer.
     /// Returns whether the file is executable. This is faster and more memory-efficient than calling
     /// `fromReader` followed by `pack`.
-    /// The reader's buffer must have at least `NixArchive.min_buffer_size` bytes.
+    /// Asserts the reader's buffer holds at `NixArchive.min_buffer_size` bytes.
     pub fn unpackFile(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
         var iter: UnpackIterator = .init(undefined, reader);
         //iter.deinit();
@@ -1167,7 +1177,7 @@ pub const NixArchive = struct {
 
     /// Reads a Nix archive containing a single symlink and returns the target. This is faster and
     /// more memory-efficient than calling `fromReader`.
-    /// The reader's buffer must have at least `NixArchive.min_buffer_size` bytes.
+    /// Asserts the reader's buffer holds at `NixArchive.min_buffer_size` bytes.
     pub fn unpackSymlink(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
         var iter: UnpackIterator = .init(undefined, reader);
         //iter.deinit();
