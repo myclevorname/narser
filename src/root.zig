@@ -380,10 +380,18 @@ pub const NixArchive = struct {
         /// Asserts the current directory entry is a file.
         pub fn takeDiscarding(self: *UnpackIterator, entry: Entry) !struct { bool, u64 } {
             std.debug.assert(entry.kind == .file);
-            const ret = try self.firstDiscarding();
+
+            const is_executable = try Token.take(self.reader, .executable_file);
+            try Token.expect(self.reader, .file_contents);
+
+            const len = try self.reader.takeInt(u64, .little);
+            try self.reader.discardAll64(len);
+
+            if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
+                return error.InvalidPadding;
 
             try Token.expect(self.reader, .directory_entry_end);
-            return ret;
+            return .{ is_executable, len };
         }
 
         pub fn firstDiscarding(self: *UnpackIterator) !struct { bool, u64 } {
@@ -424,10 +432,8 @@ pub const NixArchive = struct {
 
         std.debug.assert(reader.buffer.len >= magic.len + directory.len);
 
-        if (!std.mem.eql(u8, try reader.peek(magic.len), magic)) {
-            std.testing.expectEqualSlices(u8, reader.peek(magic.len) catch unreachable, magic) catch {};
+        if (!std.mem.eql(u8, try reader.peek(magic.len), magic))
             return error.NotANar;
-        }
 
         if (std.mem.eql(u8, try reader.peek(magic.len + file.len), magic ++ file))
             return .file
