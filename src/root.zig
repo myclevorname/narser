@@ -155,7 +155,6 @@ pub const NixArchive = struct {
     /// A higher-level directory entry-based iterator built upon `Token`.
     /// The reader's buffer must have at least `NixArchive.min_buffer_size` bytes.
     pub const UnpackIterator = struct {
-        allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
         names: std.ArrayList(struct {
             name: [std.fs.max_name_bytes]u8,
@@ -175,18 +174,17 @@ pub const NixArchive = struct {
             directory,
         };
 
-        pub fn init(allocator: std.mem.Allocator, reader: *std.Io.Reader) UnpackIterator {
+        pub fn init(reader: *std.Io.Reader) UnpackIterator {
             std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes +
                 Token.toString(.directory_entry_end).len);
             return .{
-                .allocator = allocator,
                 .reader = reader,
                 .names = .empty,
             };
         }
 
-        pub fn deinit(self: *UnpackIterator) void {
-            self.names.deinit(self.allocator);
+        pub fn deinit(self: *UnpackIterator, allocator: std.mem.Allocator) void {
+            self.names.deinit(allocator);
             self.* = undefined;
         }
 
@@ -195,7 +193,12 @@ pub const NixArchive = struct {
         /// `.file`: Stream the contents into the writer
         /// `.directory`: Enter the directory, asserting `depth_hint` is nonzero.
         /// `.symlink`: Return the slice
-        pub fn first(self: *UnpackIterator, writer: ?*std.Io.Writer, depth_hint: usize) !Contents {
+        pub fn first(
+            self: *UnpackIterator,
+            allocator: ?std.mem.Allocator,
+            writer: ?*std.Io.Writer,
+            depth_hint: usize,
+        ) !Contents {
             const kind = try peekType(self.reader);
 
             std.debug.assert((kind == .file) == (writer != null));
@@ -223,7 +226,7 @@ pub const NixArchive = struct {
                 .directory => {
                     std.debug.assert(depth_hint > 0);
                     Token.expect(self.reader, .directory) catch unreachable;
-                    try self.names.ensureTotalCapacity(self.allocator, depth_hint);
+                    try self.names.ensureTotalCapacity(allocator.?, depth_hint);
                     const first_name = self.names.addOneAssumeCapacity();
                     first_name.len = 0;
                     std.debug.assert(first_name == &self.names.items[0]);
@@ -234,10 +237,10 @@ pub const NixArchive = struct {
 
         /// Get the next entry within the current directory. `null` means leaving a directory.
         /// Name invalidated upon calling `next` or `finish`.
-        pub fn next(self: *UnpackIterator) !?Entry {
+        pub fn next(self: *UnpackIterator, allocator: std.mem.Allocator) !?Entry {
             if (try Token.take(self.reader, .directory_entry)) {
                 // We may return a directory, in which case self.names may reallocate.
-                try self.names.ensureUnusedCapacity(self.allocator, 1);
+                try self.names.ensureUnusedCapacity(allocator, 1);
 
                 const prev_buf = &self.names.items[self.names.items.len - 1];
                 const prev = prev_buf.name[0..prev_buf.len];
@@ -281,7 +284,7 @@ pub const NixArchive = struct {
         }
 
         /// Skip the current entry and its contents, invalidating the entry.
-        pub fn skip(self: *UnpackIterator, entry: Entry) !void {
+        pub fn skip(self: *UnpackIterator, allocator: std.mem.Allocator, entry: Entry) !void {
             std.debug.assert(self.names.items.len != 0);
             const State = enum {
                 start,
@@ -297,7 +300,7 @@ pub const NixArchive = struct {
                     .file => continue :state .file,
                     .symlink => continue :state .symlink,
                     .directory => {
-                        const child = try self.names.addOne(self.allocator);
+                        const child = self.names.addOneAssumeCapacity();
                         child.len = 0;
                         continue :state .next;
                     },
@@ -320,7 +323,7 @@ pub const NixArchive = struct {
                 },
                 .next => {
                     if (self.names.items.len == depth) return;
-                    if (try self.next()) |e| {
+                    if (try self.next(allocator)) |e| {
                         switch (e.kind) {
                             .file => continue :state .file,
                             .symlink => continue :state .symlink,
@@ -413,9 +416,9 @@ pub const NixArchive = struct {
         }
 
         /// Finish parsing the archive. This does not free the memory: call `.deinit` after.
-        pub fn finish(self: *UnpackIterator) !void {
+        pub fn finish(self: *UnpackIterator, allocator: ?std.mem.Allocator) !void {
             while (self.names.items.len != 0) {
-                if (try self.next()) |e| _ = try self.skip(e);
+                if (try self.next(allocator.?)) |e| _ = try self.skip(allocator.?, e);
             }
 
             try Token.expect(self.reader, .archive_end);
@@ -489,8 +492,8 @@ pub const NixArchive = struct {
         self.pool = .init(self.arena.allocator());
         errdefer self.deinit();
 
-        var iter: UnpackIterator = .init(allocator, reader);
-        defer iter.deinit();
+        var iter: UnpackIterator = .init(reader);
+        defer iter.deinit(arena);
 
         var current = try self.pool.create();
         current.* = .{
@@ -519,7 +522,7 @@ pub const NixArchive = struct {
                 .file => {
                     if (options.store_file_contents) {
                         var aw: std.Io.Writer.Allocating = .init(arena);
-                        const is_executable = (try iter.first(&aw.writer, 0)).file;
+                        const is_executable = (try iter.first(arena, &aw.writer, 0)).file;
                         current.data = .{ .file = .{
                             .is_executable = is_executable,
                             .contents = aw.toOwnedSlice() catch unreachable,
@@ -534,18 +537,18 @@ pub const NixArchive = struct {
                     continue :state .end;
                 },
                 .symlink => {
-                    const target = (try iter.first(null, 0)).symlink;
+                    const target = (try iter.first(null, null, 0)).symlink;
                     current.data = .{ .symlink = try arena.dupe(u8, target) };
                     continue :state .end;
                 },
                 .directory => {
-                    std.debug.assert(try iter.first(null, 1) == .directory);
+                    std.debug.assert(try iter.first(arena, null, 1) == .directory);
                     current.data = .{ .directory = null };
                     continue :state .first_entry;
                 },
             },
             .first_entry => {
-                if (try iter.next()) |child| {
+                if (try iter.next(arena)) |child| {
                     const next = try self.pool.create();
                     current.data.directory = next;
                     current_entry = child;
@@ -596,7 +599,7 @@ pub const NixArchive = struct {
                 continue :state .next;
             },
             .next => {
-                if (try iter.next()) |next_entry| {
+                if (try iter.next(allocator)) |next_entry| {
                     current_entry = next_entry;
 
                     const next = try self.pool.create();
@@ -626,7 +629,7 @@ pub const NixArchive = struct {
             },
             .end => {
                 std.debug.assert(iter.names.items.len == 0);
-                try iter.finish();
+                try iter.finish(arena);
                 return self;
             },
         }
@@ -1086,16 +1089,16 @@ pub const NixArchive = struct {
 
         const State = enum { next, directory, file, symlink, end, leave_directory };
 
-        var iter: UnpackIterator = .init(allocator, reader);
-        defer iter.deinit();
+        var iter: UnpackIterator = .init(reader);
+        defer iter.deinit(allocator);
 
-        std.debug.assert(try iter.first(null, 1) == .directory); // TODO: depth_hint as arg
+        std.debug.assert(try iter.first(allocator, null, 1) == .directory); // TODO: depth_hint as arg
 
         var entry: UnpackIterator.Entry = undefined;
 
         state: switch (State.next) {
             .next => {
-                entry = try iter.next() orelse continue :state .leave_directory;
+                entry = try iter.next(allocator) orelse continue :state .leave_directory;
                 switch (entry.kind) {
                     .file => continue :state .file,
                     .directory => continue :state .directory,
@@ -1162,7 +1165,7 @@ pub const NixArchive = struct {
             },
             .end => {
                 std.debug.assert(iter.names.items.len == 0);
-                try iter.finish();
+                try iter.finish(allocator);
                 return;
             },
         }
@@ -1174,10 +1177,10 @@ pub const NixArchive = struct {
     /// `fromReader` followed by `pack`.
     /// Asserts the reader's buffer holds at `NixArchive.min_buffer_size` bytes.
     pub fn unpackFile(reader: *std.Io.Reader, writer: *std.Io.Writer) !bool {
-        var iter: UnpackIterator = .init(undefined, reader);
+        var iter: UnpackIterator = .init(reader);
         //iter.deinit();
-        const is_executable = (try iter.first(writer, 0)).file;
-        try iter.finish();
+        const is_executable = (try iter.first(null, writer, 0)).file;
+        try iter.finish(null);
         return is_executable;
     }
 
@@ -1185,11 +1188,11 @@ pub const NixArchive = struct {
     /// more memory-efficient than calling `fromReader`.
     /// Asserts the reader's buffer holds at `NixArchive.min_buffer_size` bytes.
     pub fn unpackSymlink(reader: *std.Io.Reader, buffer: *[std.fs.max_path_bytes]u8) ![]u8 {
-        var iter: UnpackIterator = .init(undefined, reader);
+        var iter: UnpackIterator = .init(reader);
         //iter.deinit();
-        const target = (try iter.first(null, 0)).symlink;
+        const target = (try iter.first(null, null, 0)).symlink;
         @memcpy(buffer[0..target.len], target);
-        try iter.finish();
+        try iter.finish(null);
         return buffer[0..target.len];
     }
 

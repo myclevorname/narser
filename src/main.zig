@@ -316,7 +316,7 @@ pub fn main() !void {
         var in_reader = in_file.reader(&in_buf);
 
         if (!opts.follow) {
-            var iter: narser.NixArchive.UnpackIterator = .init(allocator, &in_reader.interface);
+            var iter: narser.NixArchive.UnpackIterator = .init(&in_reader.interface);
             //defer iter.deinit();
 
             var parts: std.ArrayList([]const u8) = .empty;
@@ -327,20 +327,20 @@ pub fn main() !void {
 
             switch (kind) {
                 .file => if (parts.items.len == 0) {
-                    _ = (try iter.first(writer, 0)).file;
+                    _ = (try iter.first(null, writer, 0)).file;
                 } else return error.NotDir,
                 .symlink => return error.IsSymlink,
                 .directory => if (parts.items.len == 0)
                     return error.IsDir
                 else {
-                    std.debug.assert(try iter.first(null, 1) == .directory);
+                    std.debug.assert(try iter.first(allocator, null, 1) == .directory);
                     level: for (0..parts.items.len) |i| {
-                        while (try iter.next()) |e| {
+                        while (try iter.next(allocator)) |e| {
                             //std.debug.print("found '{s}' (expecting '{s}')\n", .{ e.name, parts.items[i] });
                             switch (std.mem.order(u8, e.name, parts.items[i])) {
                                 .lt => {
                                     const a = iter.names.items.len;
-                                    try iter.skip(e);
+                                    try iter.skip(allocator, e);
                                     std.debug.assert(a == iter.names.items.len);
                                 },
                                 .eq => {
