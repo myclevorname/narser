@@ -493,7 +493,7 @@ pub const NixArchive = struct {
         errdefer self.deinit();
 
         var iter: UnpackIterator = .init(reader);
-        defer iter.deinit(arena);
+        defer iter.deinit(allocator);
 
         var current = try self.pool.create();
         current.* = .{
@@ -522,7 +522,7 @@ pub const NixArchive = struct {
                 .file => {
                     if (options.store_file_contents) {
                         var aw: std.Io.Writer.Allocating = .init(arena);
-                        const is_executable = (try iter.first(arena, &aw.writer, 0)).file;
+                        const is_executable = (try iter.first(null, &aw.writer, 0)).file;
                         current.data = .{ .file = .{
                             .is_executable = is_executable,
                             .contents = aw.toOwnedSlice() catch unreachable,
@@ -542,13 +542,13 @@ pub const NixArchive = struct {
                     continue :state .end;
                 },
                 .directory => {
-                    std.debug.assert(try iter.first(arena, null, 1) == .directory);
+                    std.debug.assert(try iter.first(allocator, null, 1) == .directory);
                     current.data = .{ .directory = null };
                     continue :state .first_entry;
                 },
             },
             .first_entry => {
-                if (try iter.next(arena)) |child| {
+                if (try iter.next(allocator)) |child| {
                     const next = try self.pool.create();
                     current.data.directory = next;
                     current_entry = child;
@@ -629,7 +629,7 @@ pub const NixArchive = struct {
             },
             .end => {
                 std.debug.assert(iter.names.items.len == 0);
-                try iter.finish(arena);
+                try iter.finish(allocator);
                 return self;
             },
         }
