@@ -9,10 +9,12 @@ const help_message =
     \\narser: Nix ARchive parSER
     \\
     \\Options:
+    \\    -f      Don't parse tne entire archive, allowing potentially-invalid
+    \\            archives (cat)
     \\    -h, -?  Display this help message
     \\    -l      Long listing (ls)
-    \\    -r, -R  Recurse (ls)
     \\    -n      File is not executable (pack, hash)
+    \\    -r, -R  Recurse (ls)
     \\    -x      File is executable (pack, hash)
     \\    -L      Follow symlinks at the cost of speed and memory (cat)
     \\
@@ -204,6 +206,7 @@ pub fn main() !void {
         recurse: bool = false,
         executable: ?bool = null,
         follow: bool = false,
+        fast: bool = false,
     };
     var opts: Options = .{};
 
@@ -215,6 +218,7 @@ pub fn main() !void {
             'r', 'R' => opts.recurse = true,
             'n' => opts.executable = false,
             'x' => opts.executable = true,
+            'f' => opts.fast = true,
             else => fatal("Invalid option '{c}'\n{s}", .{ opt, help_message }),
         },
         .argument => |str| try processed_args.append(allocator, str),
@@ -362,7 +366,7 @@ pub fn main() !void {
                 },
             }
 
-            // _ = try narser.NixArchive.unpackSubFile(allocator, &in_reader.interface, writer, subpath);
+            if (!opts.fast) try iter.finish(allocator);
         } else {
             var archive = try narser.NixArchive.fromReader(allocator, &in_reader.interface, .{});
             //defer archive.deinit();
