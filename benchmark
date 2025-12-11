@@ -5,26 +5,26 @@ echo $1
 mkdir $1 || exit 1
 cd $1
 
-nix build git+https://git.lix.systems/lix-project/lix?rev=95f15cf94fb621795eb854db6d0387cfd22cd310 -o lix >& /dev/null || exit 1
-nix build github:NixOS/nix/4a2fb18ba00b0771652f4d5d047910e2e41e238d -o nix >& /dev/null || exit 1
+nix build git+https://git.lix.systems/lix-project/lix?rev=36a61d922c51a16b57a88f44833960bf32c92d39 -o lix >& /dev/null || exit 1
+nix build github:NixOS/nix/8b955d80c2d73dcf9a87127b1afd37d3d1f5d220 -o nix >& /dev/null || exit 1
 # narz fails in f790364c93142affa3cc699365545d6a11916a76
 nix build git+https://git.sr.ht/~watersucks/narz?rev=760736b98e08c7c741838f5ad020d6d2e33b5e57 -o narz >& /dev/null || exit 1
-nix build git+https://codeberg.org/clevor/narser?rev=1171b78ee5e96679fa4826b8b9f75ee6c3c7ff5a -o narser >& /dev/null || exit 1
+nix build git+https://codeberg.org/clevor/narser?rev=bb37d718c120db4aea7b115fe48f9a506e8fbc93 -o narser >& /dev/null || exit 1
 nix build gitlab:abstract-binary/nix-nar-rs/c8d9250b9be837abafa0046cb9c2a852b846da6a -o nix-nar >& /dev/null || exit 1
 
 git clone https://github.com/torvalds/linux --depth=1 -q
 cd linux
 git log | head
-commit d127176862a93c4b3216bda533d2bee170af5e71
+commit 5c179cac051943f673c8baa53214e2566bfe69dc
 Author: Linus Torvalds <torvalds@linux-foundation.org>
-Date:   Thu Oct 30 19:48:13 2025 -0700
+Date:   Thu Dec 11 08:01:52 2025 +0900
 
-    Merge tag 'linux_kselftest-fixes-6.18-rc4' of git://git.kernel.org/pub/scm/linux/kernel/git/shuah/linux-kselftest
+    Merge tag 'alpha-for-v6.19-tag' of git://git.kernel.org/pub/scm/linux/kernel/git/lindholm/alpha
     
-    Pull kselftest fixes from Shuah Khan:
-     "Fix build warning in cachestat found during clang build and add
-      tmpshmcstat to .gitignore"
-    
+    Pull alpha updates from Magnus Lindholm:
+     "Two small uapi fixes. One patch hardcodes TC* ioctl values that
+      previously depended on the deprecated termio struct, avoiding build
+      issues with newer glibc versions. The other patch switches uapi
 cd ..
 
 nix nar pack linux > linux.nar
@@ -66,340 +66,358 @@ cmp <(./nix/bin/nix nar ls linux.nar / -R) <(./nix-nar/bin/nix-nar ls linux.nar 
 poop -d 60000 "./nix/bin/nix nar pack linux" "./lix/bin/nix nar dump-path linux" "./narser/bin/narser pack linux" "./nix-nar/bin/nix-nar dump-path linux"
 Benchmark 1 (32 runs): ./nix/bin/nix nar pack linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          1.90s  ± 51.5ms                              1.84s  … 1.99s                                     0 ( 0%)        0%
-  peak_rss           37.4MB ±  109KB                              37.2MB … 37.7MB                                    2 ( 6%)        0%
-  cpu_cycles         3.54G  ±  183M                               3.37G  … 3.82G                                     0 ( 0%)        0%
-  instructions       7.42G  ±  171K                               7.42G  … 7.42G                                     0 ( 0%)        0%
-  cache_references   53.3M  ± 3.43M                               47.3M  … 62.2M                                     0 ( 0%)        0%
-  cache_misses       4.34M  ± 45.1K                               4.27M  … 4.49M                                     1 ( 3%)        0%
-  branch_misses      12.1M  ± 4.27M                               8.04M  … 19.1M                                     0 ( 0%)        0%
-Benchmark 2 (53 runs): ./lix/bin/nix nar dump-path linux
+  wall_time          1.93s  ± 51.5ms                              1.89s  … 2.05s                                     6 (19%)        0%
+  peak_rss           38.0MB ±  109KB                              37.8MB … 38.2MB                                    0 ( 0%)        0%
+  cpu_cycles         3.52G  ±  170M                               3.40G  … 3.88G                                     6 (19%)        0%
+  instructions       7.52G  ±  174K                               7.52G  … 7.52G                                     0 ( 0%)        0%
+  cache_references   56.6M  ± 3.56M                               52.1M  … 69.0M                                     1 ( 3%)        0%
+  cache_misses       4.45M  ± 46.1K                               4.38M  … 4.62M                                     2 ( 6%)        0%
+  branch_misses      10.8M  ± 3.70M                               8.32M  … 18.5M                                     6 (19%)        0%
+Benchmark 2 (51 runs): ./lix/bin/nix nar dump-path linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          1.15s  ± 16.9ms                              1.13s  … 1.20s                                     0 ( 0%)        ⚡- 39.3% ±  0.8%
-  peak_rss           33.6MB ±  156KB                              33.2MB … 33.9MB                                    1 ( 2%)        ⚡- 10.3% ±  0.2%
-  cpu_cycles         1.38G  ± 49.4M                               1.32G  … 1.51G                                     0 ( 0%)        ⚡- 61.0% ±  1.5%
-  instructions       1.84G  ± 9.14K                               1.84G  … 1.84G                                     0 ( 0%)        ⚡- 75.2% ±  0.0%
-  cache_references   85.7M  ± 4.42M                               77.7M  … 96.8M                                     0 ( 0%)        💩+ 60.8% ±  3.4%
-  cache_misses        764K  ± 29.3K                                736K  …  916K                                     3 ( 6%)        ⚡- 82.4% ±  0.4%
-  branch_misses      4.22M  ±  978K                               3.14M  … 6.93M                                     0 ( 0%)        ⚡- 65.0% ± 10.1%
-Benchmark 3 (82 runs): ./narser/bin/narser pack linux
+  wall_time          1.20s  ± 18.4ms                              1.18s  … 1.26s                                     1 ( 2%)        ⚡- 38.0% ±  0.8%
+  peak_rss           33.7MB ±  183KB                              33.2MB … 34.1MB                                    0 ( 0%)        ⚡- 11.5% ±  0.2%
+  cpu_cycles         1.40G  ± 55.4M                               1.35G  … 1.58G                                     0 ( 0%)        ⚡- 60.2% ±  1.5%
+  instructions       1.86G  ± 8.64K                               1.86G  … 1.86G                                     0 ( 0%)        ⚡- 75.2% ±  0.0%
+  cache_references   88.1M  ± 3.15M                               81.9M  … 93.8M                                     0 ( 0%)        💩+ 55.5% ±  2.6%
+  cache_misses        785K  ± 41.1K                                752K  …  999K                                     3 ( 6%)        ⚡- 82.3% ±  0.4%
+  branch_misses      4.17M  ± 1.06M                               3.14M  … 7.32M                                     0 ( 0%)        ⚡- 61.4% ± 10.1%
+Benchmark 3 (78 runs): ./narser/bin/narser pack linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           734ms ± 3.53ms                               727ms …  740ms                                    0 ( 0%)        ⚡- 61.4% ±  0.6%
-  peak_rss           1.25MB ± 65.9KB                              1.18MB … 1.31MB                                    0 ( 0%)        ⚡- 96.7% ±  0.1%
-  cpu_cycles          236M  ± 2.04M                                232M  …  243M                                     1 ( 1%)        ⚡- 93.3% ±  1.1%
-  instructions        432M  ± 18.1                                 432M  …  432M                                     1 ( 1%)        ⚡- 94.2% ±  0.0%
-  cache_references   6.42M  ±  734K                               5.17M  … 9.73M                                     3 ( 4%)        ⚡- 87.9% ±  1.5%
-  cache_misses        173K  ± 9.50K                                141K  …  193K                                     1 ( 1%)        ⚡- 96.0% ±  0.2%
-  branch_misses       733K  ± 5.75K                                724K  …  751K                                     1 ( 1%)        ⚡- 93.9% ±  7.7%
-Benchmark 4 (39 runs): ./nix-nar/bin/nix-nar dump-path linux
+  wall_time           770ms ± 3.56ms                               764ms …  782ms                                    1 ( 1%)        ⚡- 60.1% ±  0.6%
+  peak_rss           1.28MB ± 59.4KB                              1.18MB … 1.31MB                                    0 ( 0%)        ⚡- 96.6% ±  0.1%
+  cpu_cycles          240M  ± 1.72M                                235M  …  244M                                     1 ( 1%)        ⚡- 93.2% ±  1.1%
+  instructions        436M  ± 14.2                                 436M  …  436M                                     2 ( 3%)        ⚡- 94.2% ±  0.0%
+  cache_references   6.67M  ±  753K                               5.66M  … 8.58M                                     0 ( 0%)        ⚡- 88.2% ±  1.5%
+  cache_misses        184K  ± 8.67K                                159K  …  202K                                     0 ( 0%)        ⚡- 95.9% ±  0.2%
+  branch_misses       755K  ± 6.16K                                742K  …  769K                                     0 ( 0%)        ⚡- 93.0% ±  7.6%
+Benchmark 4 (38 runs): ./nix-nar/bin/nix-nar dump-path linux
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          1.54s  ± 7.77ms                              1.53s  … 1.56s                                     0 ( 0%)        ⚡- 18.8% ±  0.9%
-  peak_rss           2.92MB ± 65.7KB                              2.74MB … 3.04MB                                    0 ( 0%)        ⚡- 92.2% ±  0.1%
-  cpu_cycles          553M  ± 10.0M                                531M  …  580M                                     2 ( 5%)        ⚡- 84.4% ±  1.7%
-  instructions        834M  ±  241K                                833M  …  835M                                     1 ( 3%)        ⚡- 88.8% ±  0.0%
-  cache_references   10.8M  ±  678K                               9.76M  … 12.8M                                     1 ( 3%)        ⚡- 79.7% ±  2.1%
-  cache_misses        387K  ± 21.2K                                344K  …  428K                                     0 ( 0%)        ⚡- 91.1% ±  0.4%
-  branch_misses      2.79M  ±  148K                               2.52M  … 3.12M                                     0 ( 0%)        ⚡- 76.8% ± 11.3%
+  wall_time          1.58s  ± 9.15ms                              1.57s  … 1.61s                                     0 ( 0%)        ⚡- 18.1% ±  0.9%
+  peak_rss           2.90MB ± 88.3KB                              2.72MB … 3.09MB                                    0 ( 0%)        ⚡- 92.4% ±  0.1%
+  cpu_cycles          552M  ± 12.2M                                534M  …  589M                                     2 ( 5%)        ⚡- 84.3% ±  1.6%
+  instructions        842M  ± 85.8K                                842M  …  842M                                     0 ( 0%)        ⚡- 88.8% ±  0.0%
+  cache_references   10.7M  ±  833K                               9.46M  … 12.9M                                     0 ( 0%)        ⚡- 81.1% ±  2.1%
+  cache_misses        423K  ± 31.6K                                379K  …  567K                                     1 ( 3%)        ⚡- 90.5% ±  0.4%
+  branch_misses      2.75M  ±  217K                               2.49M  … 3.47M                                     1 ( 3%)        ⚡- 74.5% ± 11.1%
 
 poop -d 60000 "./nix/bin/nix nar ls linux.nar /" "./lix/bin/nix nar ls linux.nar /" "./narser/bin/narser ls linux.nar /" "./nix-nar/bin/nix-nar ls linux.nar /" "./narz/bin/narz ls linux.nar /"
-Benchmark 1 (85 runs): ./nix/bin/nix nar ls linux.nar /
+Benchmark 1 (144 runs): ./nix/bin/nix nar ls linux.nar /
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           706ms ± 13.8ms                               690ms …  741ms                                    0 ( 0%)        0%
-  peak_rss            141MB ±  111KB                               140MB …  141MB                                    1 ( 1%)        0%
-  cpu_cycles         1.54G  ± 45.2M                               1.49G  … 1.65G                                     0 ( 0%)        0%
-  instructions       2.60G  ±  875K                               2.60G  … 2.61G                                     0 ( 0%)        0%
-  cache_references   38.9M  ± 2.63M                               35.3M  … 47.8M                                     1 ( 1%)        0%
-  cache_misses       13.3M  ± 71.9K                               13.1M  … 13.5M                                     0 ( 0%)        0%
-  branch_misses      6.68M  ± 1.04M                               5.71M  … 9.07M                                     0 ( 0%)        0%
-Benchmark 2 (24 runs): ./lix/bin/nix nar ls linux.nar /
+  wall_time           417ms ± 4.31ms                               410ms …  430ms                                    1 ( 1%)        0%
+  peak_rss           71.2MB ±  130KB                              70.8MB … 71.5MB                                    0 ( 0%)        0%
+  cpu_cycles          574M  ± 11.9M                                558M  …  616M                                     1 ( 1%)        0%
+  instructions       1.12G  ±  123K                               1.12G  … 1.12G                                     0 ( 0%)        0%
+  cache_references   9.73M  ± 1.65M                               7.85M  … 16.7M                                    11 ( 8%)        0%
+  cache_misses       2.28M  ± 19.5K                               2.24M  … 2.36M                                     3 ( 2%)        0%
+  branch_misses      1.73M  ±  297K                               1.47M  … 2.87M                                     1 ( 1%)        0%
+Benchmark 2 (23 runs): ./lix/bin/nix nar ls linux.nar /
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          2.59s  ± 11.0ms                              2.57s  … 2.61s                                     0 ( 0%)        💩+267.0% ±  0.9%
-  peak_rss           3.75GB ±  126KB                              3.75GB … 3.75GB                                    0 ( 0%)        💩+2565.1% ±  0.0%
-  cpu_cycles         2.92G  ± 24.6M                               2.89G  … 2.98G                                     0 ( 0%)        💩+ 89.7% ±  1.2%
-  instructions       2.18G  ± 6.96K                               2.18G  … 2.18G                                     0 ( 0%)        ⚡- 16.3% ±  0.0%
-  cache_references    129M  ± 3.11M                                127M  …  140M                                     3 (13%)        💩+232.6% ±  3.2%
-  cache_misses       70.6M  ±  139K                               70.4M  … 70.9M                                     0 ( 0%)        💩+432.4% ±  0.3%
-  branch_misses      4.22M  ±  478K                               3.77M  … 5.83M                                     1 ( 4%)        ⚡- 36.8% ±  6.5%
-Benchmark 3 (589 runs): ./narser/bin/narser ls linux.nar /
+  wall_time          2.69s  ± 8.90ms                              2.68s  … 2.71s                                     0 ( 0%)        💩+546.2% ±  0.5%
+  peak_rss           3.79GB ±  123KB                              3.79GB … 3.79GB                                    0 ( 0%)        💩+5224.5% ±  0.1%
+  cpu_cycles         2.98G  ± 24.1M                               2.94G  … 3.03G                                     0 ( 0%)        💩+418.6% ±  1.1%
+  instructions       2.20G  ± 7.21K                               2.20G  … 2.20G                                     0 ( 0%)        💩+ 96.2% ±  0.0%
+  cache_references    138M  ± 2.65M                                135M  …  147M                                     1 ( 4%)        💩+1313.1% ±  8.2%
+  cache_misses       71.3M  ±  153K                               71.0M  … 71.6M                                     0 ( 0%)        💩+3024.0% ±  1.1%
+  branch_misses      4.45M  ±  491K                               3.84M  … 5.32M                                     0 ( 0%)        💩+156.6% ±  8.4%
+Benchmark 3 (552 runs): ./narser/bin/narser ls linux.nar /
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           102ms ± 1.22ms                               101ms …  109ms                                   57 (10%)        ⚡- 85.6% ±  0.2%
-  peak_rss           33.4MB ± 7.63KB                              33.3MB … 33.4MB                                    2 ( 0%)        ⚡- 76.3% ±  0.0%
-  cpu_cycles         63.7M  ±  665K                               63.0M  … 69.7M                                    34 ( 6%)        ⚡- 95.9% ±  0.2%
-  instructions        121M  ± 6.19                                 121M  …  121M                                    32 ( 5%)        ⚡- 95.3% ±  0.0%
-  cache_references   1.13M  ± 32.7K                               1.03M  … 1.22M                                     5 ( 1%)        ⚡- 97.1% ±  0.5%
-  cache_misses       15.9K  ± 1.37K                               12.9K  … 22.0K                                    43 ( 7%)        ⚡- 99.9% ±  0.0%
-  branch_misses       396K  ± 5.31K                                392K  …  463K                                    69 (12%)        ⚡- 94.1% ±  1.3%
-Benchmark 4 (116 runs): ./nix-nar/bin/nix-nar ls linux.nar /
+  wall_time           109ms ±  751us                               108ms …  116ms                                   30 ( 5%)        ⚡- 73.9% ±  0.1%
+  peak_rss           33.8MB ± 15.7KB                              33.7MB … 33.8MB                                    8 ( 1%)        ⚡- 52.5% ±  0.0%
+  cpu_cycles         65.5M  ±  560K                               64.9M  … 69.1M                                    41 ( 7%)        ⚡- 88.6% ±  0.2%
+  instructions        122M  ± 4.90                                 122M  …  122M                                     8 ( 1%)        ⚡- 89.1% ±  0.0%
+  cache_references   1.20M  ± 37.5K                               1.12M  … 1.36M                                    16 ( 3%)        ⚡- 87.6% ±  1.4%
+  cache_misses       17.7K  ± 1.52K                               14.7K  … 24.4K                                    53 (10%)        ⚡- 99.2% ±  0.1%
+  branch_misses       396K  ± 3.34K                                393K  …  424K                                    54 (10%)        ⚡- 77.2% ±  1.4%
+Benchmark 4 (111 runs): ./nix-nar/bin/nix-nar ls linux.nar /
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           518ms ± 3.74ms                               513ms …  532ms                                    1 ( 1%)        ⚡- 26.6% ±  0.4%
-  peak_rss           2.39MB ± 63.8KB                              2.28MB … 2.56MB                                    0 ( 0%)        ⚡- 98.3% ±  0.0%
-  cpu_cycles          946M  ± 10.1M                                934M  … 1000M                                     4 ( 3%)        ⚡- 38.5% ±  0.6%
-  instructions       1.52G  ± 79.2K                               1.52G  … 1.52G                                     0 ( 0%)        ⚡- 41.8% ±  0.0%
-  cache_references   9.00M  ± 3.43M                               4.14M  … 21.9M                                     5 ( 4%)        ⚡- 76.8% ±  2.2%
-  cache_misses       56.4K  ± 8.08K                               44.5K  … 76.1K                                     0 ( 0%)        ⚡- 99.6% ±  0.1%
-  branch_misses      1.16M  ±  157K                                982K  … 1.66M                                     2 ( 2%)        ⚡- 82.7% ±  2.9%
-Benchmark 5 (17 runs): ./narz/bin/narz ls linux.nar /
+  wall_time           544ms ± 4.38ms                               539ms …  573ms                                    2 ( 2%)        💩+ 30.5% ±  0.3%
+  peak_rss           2.40MB ± 58.2KB                              2.28MB … 2.55MB                                    0 ( 0%)        ⚡- 96.6% ±  0.0%
+  cpu_cycles          956M  ± 12.7M                                944M  … 1.05G                                     4 ( 4%)        💩+ 66.6% ±  0.5%
+  instructions       1.53G  ± 81.2K                               1.53G  … 1.53G                                     0 ( 0%)        💩+ 36.5% ±  0.0%
+  cache_references   11.0M  ± 3.50M                               5.27M  … 25.3M                                     2 ( 2%)        💩+ 13.4% ±  6.7%
+  cache_misses       60.2K  ± 8.99K                               45.3K  … 79.8K                                     0 ( 0%)        ⚡- 97.4% ±  0.2%
+  branch_misses      1.15M  ±  174K                               1.01M  … 2.41M                                     2 ( 2%)        ⚡- 33.5% ±  3.6%
+Benchmark 5 (16 runs): ./narz/bin/narz ls linux.nar /
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          3.65s  ± 14.7ms                              3.63s  … 3.67s                                     0 ( 0%)        💩+416.9% ±  1.0%
-  peak_rss           1.85GB ± 81.8KB                              1.85GB … 1.85GB                                    0 ( 0%)        💩+1210.8% ±  0.0%
-  cpu_cycles          878M  ± 3.52M                                873M  …  885M                                     0 ( 0%)        ⚡- 42.9% ±  1.4%
-  instructions        870M  ±  153                                 870M  …  870M                                     0 ( 0%)        ⚡- 66.6% ±  0.0%
-  cache_references   4.34M  ±  178K                               4.14M  … 4.78M                                     1 ( 6%)        ⚡- 88.8% ±  3.3%
-  cache_misses        116K  ± 5.00K                                109K  …  126K                                     0 ( 0%)        ⚡- 99.1% ±  0.3%
-  branch_misses      1.73M  ± 59.2K                               1.64M  … 1.83M                                     0 ( 0%)        ⚡- 74.1% ±  7.6%
+  wall_time          3.76s  ± 5.44ms                              3.75s  … 3.77s                                     0 ( 0%)        💩+802.4% ±  0.5%
+  peak_rss           1.86GB ± 65.5KB                              1.86GB … 1.86GB                                    0 ( 0%)        💩+2519.1% ±  0.1%
+  cpu_cycles          892M  ± 2.32M                                888M  …  896M                                     0 ( 0%)        💩+ 55.6% ±  1.0%
+  instructions        879M  ±  184                                 879M  …  879M                                     1 ( 6%)        ⚡- 21.7% ±  0.0%
+  cache_references   5.40M  ±  546K                               4.69M  … 6.27M                                     0 ( 0%)        ⚡- 44.5% ±  8.4%
+  cache_misses        122K  ± 4.87K                                114K  …  131K                                     0 ( 0%)        ⚡- 94.7% ±  0.4%
+  branch_misses      1.81M  ± 40.8K                               1.75M  … 1.88M                                     0 ( 0%)          +  4.5% ±  8.4%
 
 poop -d 60000 "./nix/bin/nix nar ls linux.nar / -R" "./lix/bin/nix nar ls linux.nar / -R" "./narser/bin/narser ls linux.nar / -R" "./nix-nar/bin/nix-nar ls linux.nar / -R" "./narz/bin/narz ls linux.nar / -r"
-Benchmark 1 (65 runs): ./nix/bin/nix nar ls linux.nar / -R
+Benchmark 1 (92 runs): ./nix/bin/nix nar ls linux.nar / -R
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           936ms ± 18.8ms                               913ms …  975ms                                    0 ( 0%)        0%
-  peak_rss            141MB ±  114KB                               141MB …  141MB                                    0 ( 0%)        0%
-  cpu_cycles         1.93G  ± 63.3M                               1.88G  … 2.06G                                     0 ( 0%)        0%
-  instructions       3.31G  ±  946K                               3.31G  … 3.32G                                     3 ( 5%)        0%
-  cache_references   48.6M  ± 2.47M                               45.3M  … 55.8M                                     3 ( 5%)        0%
-  cache_misses       15.8M  ±  101K                               15.7M  … 16.1M                                     0 ( 0%)        0%
-  branch_misses      9.14M  ± 1.54M                               7.87M  … 12.3M                                     0 ( 0%)        0%
-Benchmark 2 (22 runs): ./lix/bin/nix nar ls linux.nar / -R
+  wall_time           653ms ± 9.26ms                               641ms …  680ms                                    0 ( 0%)        0%
+  peak_rss           71.2MB ±  132KB                              70.8MB … 71.4MB                                    0 ( 0%)        0%
+  cpu_cycles          982M  ± 30.1M                                950M  … 1.05G                                     0 ( 0%)        0%
+  instructions       1.85G  ±  393K                               1.85G  … 1.85G                                     4 ( 4%)        0%
+  cache_references   20.3M  ± 3.21M                               17.8M  … 36.5M                                     8 ( 9%)        0%
+  cache_misses       4.76M  ± 81.3K                               4.66M  … 5.01M                                     2 ( 2%)        0%
+  branch_misses      4.26M  ±  748K                               3.60M  … 5.99M                                     0 ( 0%)        0%
+Benchmark 2 (21 runs): ./lix/bin/nix nar ls linux.nar / -R
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          2.85s  ± 15.3ms                              2.83s  … 2.88s                                     0 ( 0%)        💩+204.7% ±  0.9%
-  peak_rss           3.75GB ± 99.2KB                              3.75GB … 3.75GB                                    0 ( 0%)        💩+2565.9% ±  0.0%
-  cpu_cycles         3.41G  ± 45.4M                               3.36G  … 3.49G                                     0 ( 0%)        💩+ 76.5% ±  1.5%
-  instructions       3.03G  ±  725K                               3.03G  … 3.03G                                     1 ( 5%)        ⚡-  8.5% ±  0.0%
-  cache_references    130M  ± 2.52M                                128M  …  139M                                     1 ( 5%)        💩+167.9% ±  2.5%
-  cache_misses       71.3M  ±  174K                               70.9M  … 71.7M                                     1 ( 5%)        💩+350.2% ±  0.4%
-  branch_misses      6.39M  ±  895K                               5.42M  … 7.88M                                     0 ( 0%)        ⚡- 30.1% ±  7.6%
-Benchmark 3 (475 runs): ./narser/bin/narser ls linux.nar / -R
+  wall_time          2.96s  ± 14.8ms                              2.94s  … 3.00s                                     1 ( 5%)        💩+352.9% ±  0.8%
+  peak_rss           3.79GB ±  147KB                              3.79GB … 3.79GB                                    0 ( 0%)        💩+5222.8% ±  0.1%
+  cpu_cycles         3.46G  ± 34.2M                               3.41G  … 3.55G                                     1 ( 5%)        💩+251.8% ±  1.5%
+  instructions       3.06G  ±  714K                               3.06G  … 3.07G                                     0 ( 0%)        💩+ 65.6% ±  0.0%
+  cache_references    141M  ± 5.43M                                137M  …  160M                                     1 ( 5%)        💩+596.1% ±  8.8%
+  cache_misses       72.1M  ±  153K                               71.9M  … 72.5M                                     1 ( 5%)        💩+1414.4% ±  1.0%
+  branch_misses      6.23M  ±  601K                               5.40M  … 8.03M                                     2 (10%)        💩+ 46.4% ±  8.1%
+Benchmark 3 (456 runs): ./narser/bin/narser ls linux.nar / -R
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           126ms ± 2.26ms                               124ms …  143ms                                   47 (10%)        ⚡- 86.5% ±  0.2%
-  peak_rss           33.4MB ± 10.4KB                              33.3MB … 33.4MB                                    3 ( 1%)        ⚡- 76.3% ±  0.0%
-  cpu_cycles          147M  ± 3.79M                                143M  …  163M                                   135 (28%)        ⚡- 92.4% ±  0.3%
-  instructions        303M  ± 7.97                                 303M  …  303M                                    23 ( 5%)        ⚡- 90.8% ±  0.0%
-  cache_references   2.23M  ± 35.8K                               2.15M  … 2.41M                                     9 ( 2%)        ⚡- 95.4% ±  0.5%
-  cache_misses        899K  ± 11.9K                                854K  …  958K                                    50 (11%)        ⚡- 94.3% ±  0.1%
-  branch_misses       555K  ± 9.90K                                548K  …  646K                                    78 (16%)        ⚡- 93.9% ±  1.5%
-Benchmark 4 (94 runs): ./nix-nar/bin/nix-nar ls linux.nar / -R
+  wall_time           132ms ± 2.15ms                               130ms …  148ms                                   72 (16%)        ⚡- 79.9% ±  0.1%
+  peak_rss           33.8MB ± 18.3KB                              33.7MB … 33.8MB                                    9 ( 2%)        ⚡- 52.5% ±  0.0%
+  cpu_cycles          144M  ± 5.04M                                139M  …  159M                                   122 (27%)        ⚡- 85.4% ±  0.3%
+  instructions        307M  ± 7.22                                 307M  …  307M                                     6 ( 1%)        ⚡- 83.4% ±  0.0%
+  cache_references   2.30M  ± 36.9K                               2.20M  … 2.41M                                    11 ( 2%)        ⚡- 88.7% ±  1.4%
+  cache_misses        910K  ± 15.2K                                874K  …  981K                                    83 (18%)        ⚡- 80.9% ±  0.2%
+  branch_misses       555K  ± 4.70K                                551K  …  601K                                    39 ( 9%)        ⚡- 87.0% ±  1.6%
+Benchmark 4 (91 runs): ./nix-nar/bin/nix-nar ls linux.nar / -R
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           641ms ± 5.05ms                               631ms …  664ms                                    3 ( 3%)        ⚡- 31.5% ±  0.4%
-  peak_rss           14.0MB ± 72.1KB                              13.8MB … 14.2MB                                    2 ( 2%)        ⚡- 90.0% ±  0.0%
-  cpu_cycles         1.14G  ± 13.4M                               1.12G  … 1.19G                                     4 ( 4%)        ⚡- 40.9% ±  0.7%
-  instructions       1.96G  ± 77.6K                               1.96G  … 1.96G                                     0 ( 0%)        ⚡- 40.7% ±  0.0%
-  cache_references   13.3M  ± 3.78M                               8.75M  … 28.2M                                     6 ( 6%)        ⚡- 72.6% ±  2.2%
-  cache_misses        177K  ± 9.66K                                159K  …  204K                                     1 ( 1%)        ⚡- 98.9% ±  0.1%
-  branch_misses      1.84M  ±  266K                               1.48M  … 2.64M                                     1 ( 1%)        ⚡- 79.9% ±  3.5%
+  wall_time           662ms ± 4.04ms                               658ms …  685ms                                    5 ( 5%)        💩+  1.3% ±  0.3%
+  peak_rss           14.2MB ± 74.6KB                              14.0MB … 14.3MB                                    0 ( 0%)        ⚡- 80.1% ±  0.0%
+  cpu_cycles         1.14G  ± 8.96M                               1.13G  … 1.18G                                     5 ( 5%)        💩+ 16.4% ±  0.7%
+  instructions       1.99G  ± 80.8K                               1.99G  … 1.99G                                     0 ( 0%)        💩+  7.3% ±  0.0%
+  cache_references   13.7M  ± 2.44M                               8.53M  … 21.7M                                     2 ( 2%)        ⚡- 32.6% ±  4.1%
+  cache_misses        180K  ± 9.03K                                166K  …  198K                                     0 ( 0%)        ⚡- 96.2% ±  0.4%
+  branch_misses      1.60M  ±  118K                               1.44M  … 2.28M                                     4 ( 4%)        ⚡- 62.5% ±  3.7%
 Benchmark 5 (16 runs): ./narz/bin/narz ls linux.nar / -r
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          3.86s  ± 9.46ms                              3.84s  … 3.87s                                     0 ( 0%)        💩+311.9% ±  1.0%
-  peak_rss           1.85GB ± 62.4KB                              1.85GB … 1.85GB                                    4 (25%)        💩+1211.6% ±  0.0%
-  cpu_cycles          969M  ± 3.22M                                964M  …  976M                                     0 ( 0%)        ⚡- 49.9% ±  1.6%
-  instructions        951M  ±  177                                 951M  …  951M                                     0 ( 0%)        ⚡- 71.3% ±  0.0%
-  cache_references   5.84M  ±  356K                               5.41M  … 6.35M                                     0 ( 0%)        ⚡- 88.0% ±  2.5%
-  cache_misses        868K  ± 5.02K                                860K  …  876K                                     0 ( 0%)        ⚡- 94.5% ±  0.3%
-  branch_misses      2.10M  ± 45.0K                               2.02M  … 2.16M                                     0 ( 0%)        ⚡- 77.1% ±  8.5%
+  wall_time          3.93s  ± 9.92ms                              3.92s  … 3.96s                                     1 ( 6%)        💩+501.4% ±  0.8%
+  peak_rss           1.86GB ± 59.8KB                              1.86GB … 1.86GB                                    4 (25%)        💩+2519.0% ±  0.1%
+  cpu_cycles          978M  ± 2.85M                                974M  …  984M                                     0 ( 0%)          -  0.4% ±  1.5%
+  instructions        961M  ±  114                                 961M  …  961M                                     0 ( 0%)        ⚡- 48.0% ±  0.0%
+  cache_references   6.32M  ±  555K                               5.79M  … 7.28M                                     0 ( 0%)        ⚡- 68.9% ±  7.9%
+  cache_misses        876K  ± 3.78K                                870K  …  881K                                     0 ( 0%)        ⚡- 81.6% ±  0.9%
+  branch_misses      2.08M  ± 38.9K                               2.02M  … 2.16M                                     0 ( 0%)        ⚡- 51.1% ±  8.7%
 
 poop -d 60000 "./nix/bin/nix nar ls linux.nar / -Rl" "./lix/bin/nix nar ls linux.nar / -Rl" "./narser/bin/narser ls linux.nar / -Rl" "./nix-nar/bin/nix-nar ls linux.nar / -Rl" "./narz/bin/narz ls linux.nar / -rl"
-Benchmark 1 (59 runs): ./nix/bin/nix nar ls linux.nar / -Rl
+Benchmark 1 (81 runs): ./nix/bin/nix nar ls linux.nar / -Rl
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          1.02s  ± 22.1ms                               997ms … 1.08s                                     9 (15%)        0%
-  peak_rss            141MB ±  123KB                               141MB …  141MB                                    0 ( 0%)        0%
-  cpu_cycles         2.23G  ± 71.4M                               2.16G  … 2.40G                                    12 (20%)        0%
-  instructions       4.01G  ±  827K                               4.01G  … 4.01G                                     1 ( 2%)        0%
-  cache_references   48.5M  ± 2.45M                               45.7M  … 56.1M                                     8 (14%)        0%
-  cache_misses       16.0M  ±  107K                               15.8M  … 16.2M                                     0 ( 0%)        0%
-  branch_misses      9.46M  ± 1.65M                               8.30M  … 13.3M                                    12 (20%)        0%
-Benchmark 2 (21 runs): ./lix/bin/nix nar ls linux.nar / -Rl
+  wall_time           741ms ± 13.1ms                               724ms …  772ms                                    0 ( 0%)        0%
+  peak_rss           71.1MB ±  123KB                              70.9MB … 71.4MB                                    0 ( 0%)        0%
+  cpu_cycles         1.29G  ± 43.7M                               1.24G  … 1.39G                                     2 ( 2%)        0%
+  instructions       2.55G  ±  398K                               2.55G  … 2.56G                                     1 ( 1%)        0%
+  cache_references   21.1M  ± 2.00M                               19.3M  … 31.4M                                     4 ( 5%)        0%
+  cache_misses       4.97M  ± 93.6K                               4.82M  … 5.31M                                     1 ( 1%)        0%
+  branch_misses      4.78M  ±  947K                               4.02M  … 6.91M                                    17 (21%)        0%
+Benchmark 2 (20 runs): ./lix/bin/nix nar ls linux.nar / -Rl
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          2.97s  ± 16.7ms                              2.94s  … 3.00s                                     0 ( 0%)        💩+191.2% ±  1.0%
-  peak_rss           3.75GB ±  131KB                              3.75GB … 3.75GB                                    1 ( 5%)        💩+2565.5% ±  0.0%
-  cpu_cycles         3.81G  ± 50.4M                               3.74G  … 3.91G                                     0 ( 0%)        💩+ 71.3% ±  1.5%
-  instructions       3.92G  ±  614K                               3.92G  … 3.92G                                     1 ( 5%)        ⚡-  2.2% ±  0.0%
-  cache_references    131M  ±  720K                                129M  …  132M                                     0 ( 0%)        💩+169.5% ±  2.2%
-  cache_misses       71.5M  ±  199K                               71.1M  … 71.9M                                     4 (19%)        💩+347.9% ±  0.4%
-  branch_misses      7.14M  ± 1.03M                               5.88M  … 9.40M                                     0 ( 0%)        ⚡- 24.5% ±  8.1%
-Benchmark 3 (463 runs): ./narser/bin/narser ls linux.nar / -Rl
+  wall_time          3.08s  ± 22.2ms                              3.05s  … 3.14s                                     1 ( 5%)        💩+316.1% ±  1.0%
+  peak_rss           3.79GB ±  141KB                              3.79GB … 3.79GB                                    0 ( 0%)        💩+5225.9% ±  0.1%
+  cpu_cycles         3.89G  ± 58.8M                               3.82G  … 4.04G                                     0 ( 0%)        💩+202.5% ±  1.8%
+  instructions       3.96G  ±  973K                               3.96G  … 3.97G                                     1 ( 5%)        💩+ 55.1% ±  0.0%
+  cache_references    143M  ± 4.89M                                138M  …  157M                                     0 ( 0%)        💩+579.9% ±  6.6%
+  cache_misses       72.1M  ±  283K                               71.3M  … 72.7M                                     2 (10%)        💩+1351.5% ±  1.5%
+  branch_misses      7.65M  ± 1.19M                               6.12M  … 10.1M                                     0 ( 0%)        💩+ 60.3% ± 10.4%
+Benchmark 3 (443 runs): ./narser/bin/narser ls linux.nar / -Rl
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           130ms ± 1.93ms                               128ms …  145ms                                   72 (16%)        ⚡- 87.3% ±  0.2%
-  peak_rss           33.4MB ± 13.6KB                              33.3MB … 33.4MB                                    5 ( 1%)        ⚡- 76.3% ±  0.0%
-  cpu_cycles          160M  ± 3.41M                                156M  …  175M                                   106 (23%)        ⚡- 92.8% ±  0.3%
-  instructions        346M  ± 7.71                                 346M  …  346M                                    24 ( 5%)        ⚡- 91.4% ±  0.0%
-  cache_references   2.34M  ± 42.4K                               2.23M  … 2.50M                                     4 ( 1%)        ⚡- 95.2% ±  0.5%
-  cache_misses        909K  ± 14.8K                                850K  …  978K                                    43 ( 9%)        ⚡- 94.3% ±  0.1%
-  branch_misses       599K  ± 6.30K                                594K  …  639K                                    71 (15%)        ⚡- 93.7% ±  1.6%
-Benchmark 4 (91 runs): ./nix-nar/bin/nix-nar ls linux.nar / -Rl
+  wall_time           136ms ± 2.47ms                               133ms …  153ms                                    6 ( 1%)        ⚡- 81.7% ±  0.2%
+  peak_rss           33.8MB ± 20.4KB                              33.7MB … 33.8MB                                   11 ( 2%)        ⚡- 52.5% ±  0.0%
+  cpu_cycles          156M  ± 5.27M                                151M  …  171M                                    73 (16%)        ⚡- 87.9% ±  0.3%
+  instructions        350M  ± 9.58                                 350M  …  350M                                    23 ( 5%)        ⚡- 86.3% ±  0.0%
+  cache_references   2.39M  ± 45.8K                               2.26M  … 2.55M                                    17 ( 4%)        ⚡- 88.7% ±  0.9%
+  cache_misses        921K  ± 20.6K                                870K  … 1000K                                    81 (18%)        ⚡- 81.5% ±  0.2%
+  branch_misses       601K  ± 6.34K                                596K  …  653K                                    65 (15%)        ⚡- 87.4% ±  1.8%
+Benchmark 4 (87 runs): ./nix-nar/bin/nix-nar ls linux.nar / -Rl
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           664ms ± 4.44ms                               659ms …  687ms                                    5 ( 5%)        ⚡- 34.9% ±  0.5%
-  peak_rss           14.0MB ± 84.3KB                              13.8MB … 14.2MB                                    1 ( 1%)        ⚡- 90.0% ±  0.0%
-  cpu_cycles         1.23G  ± 11.9M                               1.22G  … 1.31G                                     6 ( 7%)        ⚡- 44.6% ±  0.7%
-  instructions       2.23G  ± 87.5K                               2.23G  … 2.23G                                     1 ( 1%)        ⚡- 44.4% ±  0.0%
-  cache_references   12.8M  ± 3.17M                               8.80M  … 27.2M                                     7 ( 8%)        ⚡- 73.6% ±  2.0%
-  cache_misses        294K  ± 8.69K                                274K  …  311K                                     0 ( 0%)        ⚡- 98.2% ±  0.1%
-  branch_misses      1.77M  ±  152K                               1.59M  … 2.62M                                     4 ( 4%)        ⚡- 81.3% ±  3.6%
+  wall_time           697ms ± 5.09ms                               688ms …  721ms                                    3 ( 3%)        ⚡-  6.0% ±  0.4%
+  peak_rss           14.1MB ± 68.4KB                              14.0MB … 14.3MB                                    0 ( 0%)        ⚡- 80.1% ±  0.0%
+  cpu_cycles         1.25G  ± 11.6M                               1.23G  … 1.30G                                     1 ( 1%)        ⚡-  2.5% ±  0.7%
+  instructions       2.25G  ±  849K                               2.25G  … 2.26G                                     3 ( 3%)        ⚡- 11.9% ±  0.0%
+  cache_references   15.3M  ± 3.79M                               10.1M  … 28.9M                                     1 ( 1%)        ⚡- 27.3% ±  4.4%
+  cache_misses        300K  ± 8.10K                                283K  …  314K                                     0 ( 0%)        ⚡- 94.0% ±  0.4%
+  branch_misses      1.99M  ±  232K                               1.62M  … 2.82M                                     1 ( 1%)        ⚡- 58.4% ±  4.3%
 Benchmark 5 (12 runs): ./narz/bin/narz ls linux.nar / -rl
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          5.03s  ± 6.24ms                              5.02s  … 5.04s                                     0 ( 0%)        💩+393.2% ±  1.3%
-  peak_rss           1.85GB ± 61.9KB                              1.85GB … 1.85GB                                    4 (33%)        💩+1211.4% ±  0.1%
-  cpu_cycles         1.14G  ± 4.49M                               1.14G  … 1.15G                                     1 ( 8%)        ⚡- 48.6% ±  1.9%
-  instructions       1.12G  ±  171                                1.12G  … 1.12G                                     1 ( 8%)        ⚡- 72.1% ±  0.0%
-  cache_references   5.85M  ±  209K                               5.58M  … 6.13M                                     0 ( 0%)        ⚡- 87.9% ±  2.9%
-  cache_misses        863K  ± 4.61K                                853K  …  871K                                     1 ( 8%)        ⚡- 94.6% ±  0.4%
-  branch_misses      2.35M  ± 51.1K                               2.25M  … 2.42M                                     2 (17%)        ⚡- 75.2% ± 10.1%
+  wall_time          5.16s  ± 14.7ms                              5.14s  … 5.19s                                     2 (17%)        💩+596.8% ±  1.1%
+  peak_rss           1.86GB ± 84.3KB                              1.86GB … 1.86GB                                    3 (25%)        💩+2520.5% ±  0.1%
+  cpu_cycles         1.16G  ± 3.50M                               1.15G  … 1.17G                                     1 ( 8%)        ⚡-  9.9% ±  2.0%
+  instructions       1.13G  ±  123                                1.13G  … 1.13G                                     2 (17%)        ⚡- 55.8% ±  0.0%
+  cache_references   6.12M  ±  456K                               5.36M  … 7.21M                                     3 (25%)        ⚡- 71.0% ±  5.5%
+  cache_misses        885K  ± 6.15K                                872K  …  895K                                     1 ( 8%)        ⚡- 82.2% ±  1.1%
+  branch_misses      2.49M  ± 56.0K                               2.39M  … 2.57M                                     0 ( 0%)        ⚡- 47.8% ± 11.4%
 
 poop -d 60000 "./nix/bin/nix nar ls linux.nar / -l" "./lix/bin/nix nar ls linux.nar / -l" "./narser/bin/narser ls linux.nar / -l" "./nix-nar/bin/nix-nar ls linux.nar / -l" "./narz/bin/narz ls linux.nar / -l"
-Benchmark 1 (86 runs): ./nix/bin/nix nar ls linux.nar / -l
+Benchmark 1 (144 runs): ./nix/bin/nix nar ls linux.nar / -l
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           704ms ± 12.9ms                               690ms …  732ms                                    0 ( 0%)        0%
-  peak_rss            141MB ±  105KB                               141MB …  141MB                                    1 ( 1%)        0%
-  cpu_cycles         1.53G  ± 42.5M                               1.50G  … 1.63G                                     0 ( 0%)        0%
-  instructions       2.60G  ±  820K                               2.60G  … 2.60G                                     0 ( 0%)        0%
-  cache_references   39.3M  ± 2.56M                               35.1M  … 47.3M                                     2 ( 2%)        0%
-  cache_misses       13.3M  ± 83.2K                               13.1M  … 13.6M                                     2 ( 2%)        0%
-  branch_misses      6.51M  ± 1.00M                               5.69M  … 8.80M                                     0 ( 0%)        0%
-Benchmark 2 (24 runs): ./lix/bin/nix nar ls linux.nar / -l
+  wall_time           417ms ± 5.24ms                               410ms …  446ms                                    4 ( 3%)        0%
+  peak_rss           71.2MB ±  130KB                              70.9MB … 71.7MB                                    1 ( 1%)        0%
+  cpu_cycles          574M  ± 13.7M                                557M  …  634M                                     4 ( 3%)        0%
+  instructions       1.12G  ±  101K                               1.12G  … 1.12G                                     0 ( 0%)        0%
+  cache_references   9.91M  ± 2.37M                               7.41M  … 29.1M                                    11 ( 8%)        0%
+  cache_misses       2.28M  ± 23.8K                               2.23M  … 2.36M                                     3 ( 2%)        0%
+  branch_misses      1.74M  ±  295K                               1.47M  … 2.88M                                     1 ( 1%)        0%
+Benchmark 2 (23 runs): ./lix/bin/nix nar ls linux.nar / -l
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          2.58s  ± 9.28ms                              2.57s  … 2.60s                                     0 ( 0%)        💩+267.0% ±  0.8%
-  peak_rss           3.75GB ±  125KB                              3.75GB … 3.75GB                                    0 ( 0%)        💩+2565.2% ±  0.0%
-  cpu_cycles         2.91G  ± 15.1M                               2.89G  … 2.94G                                     0 ( 0%)        💩+ 89.5% ±  1.1%
-  instructions       2.18G  ± 7.18K                               2.18G  … 2.18G                                     0 ( 0%)        ⚡- 16.3% ±  0.0%
-  cache_references    129M  ± 4.27M                                126M  …  147M                                     2 ( 8%)        💩+228.6% ±  3.5%
-  cache_misses       70.7M  ±  165K                               70.4M  … 71.0M                                     0 ( 0%)        💩+431.7% ±  0.4%
-  branch_misses      4.10M  ±  343K                               3.72M  … 4.85M                                     0 ( 0%)        ⚡- 37.1% ±  6.4%
-Benchmark 3 (592 runs): ./narser/bin/narser ls linux.nar / -l
+  wall_time          2.69s  ± 12.0ms                              2.67s  … 2.71s                                     0 ( 0%)        💩+544.0% ±  0.7%
+  peak_rss           3.79GB ±  108KB                              3.79GB … 3.79GB                                    0 ( 0%)        💩+5224.3% ±  0.1%
+  cpu_cycles         2.97G  ± 19.5M                               2.94G  … 3.01G                                     0 ( 0%)        💩+417.4% ±  1.1%
+  instructions       2.20G  ± 7.64K                               2.20G  … 2.20G                                     0 ( 0%)        💩+ 96.2% ±  0.0%
+  cache_references    139M  ± 3.49M                                135M  …  151M                                     1 ( 4%)        💩+1300.6% ± 11.3%
+  cache_misses       71.3M  ±  224K                               70.7M  … 71.8M                                     1 ( 4%)        💩+3029.8% ±  1.6%
+  branch_misses      4.21M  ±  318K                               3.81M  … 4.82M                                     0 ( 0%)        💩+141.6% ±  7.5%
+Benchmark 3 (550 runs): ./narser/bin/narser ls linux.nar / -l
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           101ms ± 1.12ms                               101ms …  119ms                                   38 ( 6%)        ⚡- 85.6% ±  0.2%
-  peak_rss           33.4MB ±    0                                33.4MB … 33.4MB                                    0 ( 0%)        ⚡- 76.3% ±  0.0%
-  cpu_cycles         63.6M  ±  641K                               63.0M  … 69.6M                                    41 ( 7%)        ⚡- 95.9% ±  0.2%
-  instructions        121M  ± 4.71                                 121M  …  121M                                     5 ( 1%)        ⚡- 95.3% ±  0.0%
-  cache_references   1.11M  ± 31.2K                               1.03M  … 1.24M                                    12 ( 2%)        ⚡- 97.2% ±  0.5%
-  cache_misses       16.1K  ± 1.51K                               12.6K  … 22.2K                                    49 ( 8%)        ⚡- 99.9% ±  0.1%
-  branch_misses       395K  ± 4.08K                                392K  …  441K                                    62 (10%)        ⚡- 93.9% ±  1.2%
-Benchmark 4 (117 runs): ./nix-nar/bin/nix-nar ls linux.nar / -l
+  wall_time           109ms ± 1.34ms                               108ms …  126ms                                   12 ( 2%)        ⚡- 73.9% ±  0.1%
+  peak_rss           33.8MB ± 22.0KB                              33.7MB … 33.8MB                                   16 ( 3%)        ⚡- 52.5% ±  0.0%
+  cpu_cycles         65.8M  ±  850K                               64.9M  … 72.8M                                     5 ( 1%)        ⚡- 88.5% ±  0.2%
+  instructions        122M  ± 4.87                                 122M  …  122M                                     2 ( 0%)        ⚡- 89.1% ±  0.0%
+  cache_references   1.21M  ± 38.9K                               1.12M  … 1.34M                                     6 ( 1%)        ⚡- 87.8% ±  2.0%
+  cache_misses       17.1K  ± 1.74K                               13.7K  … 23.0K                                    43 ( 8%)        ⚡- 99.3% ±  0.1%
+  branch_misses       396K  ± 4.17K                                393K  …  440K                                    58 (11%)        ⚡- 77.3% ±  1.4%
+Benchmark 4 (111 runs): ./nix-nar/bin/nix-nar ls linux.nar / -l
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           516ms ± 4.25ms                               512ms …  539ms                                    8 ( 7%)        ⚡- 26.8% ±  0.4%
-  peak_rss           2.40MB ± 60.5KB                              2.28MB … 2.56MB                                    0 ( 0%)        ⚡- 98.3% ±  0.0%
-  cpu_cycles          942M  ± 10.6M                                934M  … 1.00G                                     8 ( 7%)        ⚡- 38.6% ±  0.5%
-  instructions       1.52G  ± 77.2K                               1.52G  … 1.52G                                     0 ( 0%)        ⚡- 41.8% ±  0.0%
-  cache_references   8.30M  ± 2.54M                               4.49M  … 15.6M                                     2 ( 2%)        ⚡- 78.9% ±  1.8%
-  cache_misses       55.9K  ± 7.48K                               43.8K  … 72.3K                                     0 ( 0%)        ⚡- 99.6% ±  0.1%
-  branch_misses      1.06M  ±  138K                                957K  … 1.81M                                     9 ( 8%)        ⚡- 83.7% ±  2.8%
+  wall_time           541ms ± 3.68ms                               538ms …  564ms                                    7 ( 6%)        💩+ 29.7% ±  0.3%
+  peak_rss           2.40MB ± 58.6KB                              2.28MB … 2.56MB                                    0 ( 0%)        ⚡- 96.6% ±  0.0%
+  cpu_cycles          952M  ± 7.53M                                943M  …  987M                                     8 ( 7%)        💩+ 65.8% ±  0.5%
+  instructions       1.53G  ± 82.5K                               1.53G  … 1.53G                                     0 ( 0%)        💩+ 36.5% ±  0.0%
+  cache_references   10.8M  ± 3.34M                               5.13M  … 22.3M                                     4 ( 4%)        💩+  8.8% ±  7.1%
+  cache_misses       58.7K  ± 7.87K                               45.4K  … 75.2K                                     0 ( 0%)        ⚡- 97.4% ±  0.2%
+  branch_misses      1.08M  ±  102K                               1.00M  … 1.70M                                     8 ( 7%)        ⚡- 37.8% ±  3.3%
 Benchmark 5 (17 runs): ./narz/bin/narz ls linux.nar / -l
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          3.64s  ± 9.00ms                              3.63s  … 3.67s                                     1 ( 6%)        💩+417.3% ±  0.9%
-  peak_rss           1.85GB ± 66.5KB                              1.85GB … 1.85GB                                    0 ( 0%)        💩+1210.9% ±  0.0%
-  cpu_cycles          877M  ± 3.21M                                871M  …  886M                                     2 (12%)        ⚡- 42.8% ±  1.3%
-  instructions        870M  ±  221                                 870M  …  870M                                     0 ( 0%)        ⚡- 66.6% ±  0.0%
-  cache_references   4.37M  ±  231K                               4.02M  … 4.91M                                     4 (24%)        ⚡- 88.9% ±  3.2%
-  cache_misses        116K  ± 4.48K                                107K  …  125K                                     1 ( 6%)        ⚡- 99.1% ±  0.3%
-  branch_misses      1.69M  ± 34.9K                               1.64M  … 1.74M                                     0 ( 0%)        ⚡- 74.0% ±  7.5%
+  wall_time          3.74s  ± 13.3ms                              3.73s  … 3.77s                                     0 ( 0%)        💩+796.6% ±  0.8%
+  peak_rss           1.86GB ± 57.3KB                              1.86GB … 1.86GB                                    4 (24%)        💩+2519.1% ±  0.1%
+  cpu_cycles          889M  ± 2.48M                                884M  …  893M                                     0 ( 0%)        💩+ 54.8% ±  1.1%
+  instructions        879M  ±  143                                 879M  …  879M                                     0 ( 0%)        ⚡- 21.7% ±  0.0%
+  cache_references   4.94M  ±  260K                               4.68M  … 5.71M                                     1 ( 6%)        ⚡- 50.2% ± 11.4%
+  cache_misses        118K  ± 6.57K                                108K  …  137K                                     1 ( 6%)        ⚡- 94.8% ±  0.5%
+  branch_misses      1.78M  ± 32.1K                               1.72M  … 1.84M                                     0 ( 0%)          +  2.0% ±  8.1%
 
-poop -d 60000 "./nix/bin/nix nar cat linux.nar /README" "./lix/bin/nix nar cat linux.nar /README" "./narser/bin/narser cat linux.nar /README" "./narser/bin/narser cat linux.nar /README -L" "./nix-nar/bin/nix-nar cat linux.nar /README " "./narz/bin/narz cat linux.nar /README"
-Benchmark 1 (89 runs): ./nix/bin/nix nar cat linux.nar /README
+poop -d 60000 "./nix/bin/nix nar cat linux.nar /README" "./lix/bin/nix nar cat linux.nar /README" "./narser/bin/narser cat linux.nar /README" "./narser/bin/narser cat linux.nar /README -f" "./narser/bin/narser cat linux.nar /README -L" "./nix-nar/bin/nix-nar cat linux.nar /README " "./narz/bin/narz cat linux.nar /README"
+Benchmark 1 (333 runs): ./nix/bin/nix nar cat linux.nar /README
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           678ms ± 9.61ms                               663ms …  707ms                                    2 ( 2%)        0%
-  peak_rss            122MB ±  183KB                               121MB …  122MB                                    0 ( 0%)        0%
-  cpu_cycles         1.47G  ± 32.3M                               1.44G  … 1.57G                                     7 ( 8%)        0%
-  instructions       2.53G  ±  697K                               2.53G  … 2.53G                                     7 ( 8%)        0%
-  cache_references   37.0M  ± 2.59M                               33.5M  … 46.4M                                     1 ( 1%)        0%
-  cache_misses       12.0M  ± 78.7K                               11.9M  … 12.2M                                     0 ( 0%)        0%
-  branch_misses      6.11M  ±  755K                               5.51M  … 8.30M                                    14 (16%)        0%
-Benchmark 2 (24 runs): ./lix/bin/nix nar cat linux.nar /README
+  wall_time           180ms ± 3.12ms                               177ms …  202ms                                    5 ( 2%)        0%
+  peak_rss           30.5MB ±  177KB                              30.1MB … 31.0MB                                    0 ( 0%)        0%
+  cpu_cycles          269M  ± 8.22M                                261M  …  319M                                     3 ( 1%)        0%
+  instructions        644M  ±  115K                                644M  …  644M                                     4 ( 1%)        0%
+  cache_references   2.46M  ±  258K                               2.05M  … 4.49M                                    16 ( 5%)        0%
+  cache_misses        366K  ± 14.0K                                350K  …  452K                                    55 (17%)        0%
+  branch_misses       720K  ±  185K                                564K  … 1.65M                                     3 ( 1%)        0%
+Benchmark 2 (23 runs): ./lix/bin/nix nar cat linux.nar /README
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          2.60s  ± 11.0ms                              2.58s  … 2.62s                                     0 ( 0%)        💩+283.5% ±  0.7%
-  peak_rss           3.75GB ±  119KB                              3.75GB … 3.75GB                                    0 ( 0%)        💩+2983.6% ±  0.1%
-  cpu_cycles         2.95G  ± 28.9M                               2.92G  … 3.03G                                     1 ( 4%)        💩+100.2% ±  1.0%
-  instructions       2.19G  ± 9.80K                               2.19G  … 2.19G                                     0 ( 0%)        ⚡- 13.5% ±  0.0%
-  cache_references    128M  ± 2.96M                                126M  …  141M                                     3 (13%)        💩+244.7% ±  3.3%
-  cache_misses       70.7M  ±  175K                               70.4M  … 71.0M                                     0 ( 0%)        💩+487.3% ±  0.4%
-  branch_misses      4.27M  ±  502K                               3.79M  … 5.63M                                     1 ( 4%)        ⚡- 30.2% ±  5.3%
-Benchmark 3 (7235 runs): ./narser/bin/narser cat linux.nar /README
+  wall_time          2.70s  ± 10.3ms                              2.68s  … 2.72s                                     0 ( 0%)        💩+1398.8% ±  0.9%
+  peak_rss           3.79GB ±  151KB                              3.79GB … 3.79GB                                    0 ( 0%)        💩+12308.2% ±  0.2%
+  cpu_cycles         3.00G  ± 23.5M                               2.96G  … 3.04G                                     0 ( 0%)        💩+1013.3% ±  1.6%
+  instructions       2.23G  ± 8.20K                               2.23G  … 2.23G                                     0 ( 0%)        💩+246.7% ±  0.0%
+  cache_references    138M  ± 2.96M                                134M  …  146M                                     0 ( 0%)        💩+5522.0% ± 13.4%
+  cache_misses       72.3M  ±  133K                               72.0M  … 72.5M                                     0 ( 0%)        💩+19663.9% ±  4.1%
+  branch_misses      4.51M  ±  402K                               3.87M  … 5.20M                                     0 ( 0%)        💩+526.2% ± 12.1%
+Benchmark 3 (691 runs): ./narser/bin/narser cat linux.nar /README
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          8.25ms ±  382us                              8.09ms … 16.6ms                                  463 ( 6%)        ⚡- 98.8% ±  0.0%
-  peak_rss           1.05MB ±    0                                1.05MB … 1.05MB                                    0 ( 0%)        ⚡- 99.1% ±  0.0%
-  cpu_cycles         5.52M  ±  222K                               5.43M  … 9.38M                                   508 ( 7%)        ⚡- 99.6% ±  0.1%
-  instructions       11.0M  ± 1.82                                11.0M  … 11.0M                                    56 ( 1%)        ⚡- 99.6% ±  0.0%
-  cache_references   23.8K  ± 2.49K                               17.3K  … 56.8K                                   407 ( 6%)        ⚡- 99.9% ±  0.2%
-  cache_misses       1.15K  ±  234                                 811   … 3.91K                                   232 ( 3%)        ⚡-100.0% ±  0.0%
-  branch_misses      49.7K  ± 1.83K                               48.4K  … 72.2K                                   810 (11%)        ⚡- 99.2% ±  0.3%
-Benchmark 4 (61 runs): ./narser/bin/narser cat linux.nar /README -L
+  wall_time          86.9ms ± 1.40ms                              86.2ms …  103ms                                   44 ( 6%)        ⚡- 51.8% ±  0.2%
+  peak_rss           1.05MB ±    0                                1.05MB … 1.05MB                                    0 ( 0%)        ⚡- 96.6% ±  0.0%
+  cpu_cycles         45.8M  ±  527K                               45.5M  … 51.2M                                    59 ( 9%)        ⚡- 83.0% ±  0.2%
+  instructions       95.5M  ± 4.89                                95.5M  … 95.5M                                    15 ( 2%)        ⚡- 85.2% ±  0.0%
+  cache_references    127K  ± 19.7K                               85.4K  …  195K                                    14 ( 2%)        ⚡- 94.9% ±  0.8%
+  cache_misses       5.21K  ± 1.22K                               3.73K  … 10.1K                                    62 ( 9%)        ⚡- 98.6% ±  0.3%
+  branch_misses       381K  ± 4.74K                                378K  …  435K                                    61 ( 9%)        ⚡- 47.0% ±  1.9%
+Benchmark 4 (6834 runs): ./narser/bin/narser cat linux.nar /README -f
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           997ms ± 6.19ms                               986ms … 1.02s                                     3 ( 5%)        💩+ 47.0% ±  0.4%
-  peak_rss           1.88GB ± 65.0KB                              1.88GB … 1.88GB                                    0 ( 0%)        💩+1447.7% ±  0.0%
-  cpu_cycles          197M  ± 1.56M                                193M  …  201M                                     1 ( 2%)        ⚡- 86.7% ±  0.6%
-  instructions        238M  ± 9.72                                 238M  …  238M                                     0 ( 0%)        ⚡- 90.6% ±  0.0%
-  cache_references   6.29M  ±  417K                               5.70M  … 7.33M                                     6 (10%)        ⚡- 83.0% ±  1.8%
-  cache_misses        251K  ± 11.3K                                227K  …  281K                                     0 ( 0%)        ⚡- 97.9% ±  0.2%
-  branch_misses       616K  ± 12.5K                                598K  …  649K                                     0 ( 0%)        ⚡- 89.9% ±  3.1%
-Benchmark 5 (774 runs): ./nix-nar/bin/nix-nar cat linux.nar /README
+  wall_time          8.73ms ±  311us                              8.59ms … 15.9ms                                  313 ( 5%)        ⚡- 95.2% ±  0.0%
+  peak_rss           1.05MB ± 1.12KB                               983KB … 1.05MB                                    2 ( 0%)        ⚡- 96.6% ±  0.0%
+  cpu_cycles         5.53M  ±  149K                               5.47M  … 9.04M                                   345 ( 5%)        ⚡- 97.9% ±  0.1%
+  instructions       11.1M  ± 1.76                                11.1M  … 11.1M                                    44 ( 1%)        ⚡- 98.3% ±  0.0%
+  cache_references   22.4K  ± 2.72K                               17.2K  … 58.9K                                   173 ( 3%)        ⚡- 99.1% ±  0.2%
+  cache_misses       1.42K  ±  288                                 990   … 4.88K                                   261 ( 4%)        ⚡- 99.6% ±  0.1%
+  branch_misses      50.7K  ±  922                                49.3K  … 68.0K                                   110 ( 2%)        ⚡- 93.0% ±  0.6%
+Benchmark 5 (57 runs): ./narser/bin/narser cat linux.nar /README -L
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          77.5ms ± 1.69ms                              76.2ms … 96.5ms                                  108 (14%)        ⚡- 88.6% ±  0.1%
-  peak_rss           2.40MB ± 59.3KB                              2.27MB … 2.55MB                                    0 ( 0%)        ⚡- 98.0% ±  0.0%
-  cpu_cycles          115M  ± 2.89M                                113M  …  151M                                    60 ( 8%)        ⚡- 92.2% ±  0.2%
-  instructions        166M  ± 9.94K                                166M  …  166M                                     0 ( 0%)        ⚡- 93.5% ±  0.0%
-  cache_references   1.30M  ±  407K                                538K  … 3.26M                                    15 ( 2%)        ⚡- 96.5% ±  0.5%
-  cache_misses       21.3K  ± 2.28K                               18.3K  … 34.0K                                    67 ( 9%)        ⚡- 99.8% ±  0.0%
-  branch_misses       125K  ± 63.7K                                105K  …  748K                                    68 ( 9%)        ⚡- 98.0% ±  0.9%
-Benchmark 6 (17 runs): ./narz/bin/narz cat linux.nar /README
+  wall_time          1.06s  ± 5.58ms                              1.05s  … 1.07s                                     0 ( 0%)        💩+487.1% ±  0.6%
+  peak_rss           1.90GB ± 55.5KB                              1.90GB … 1.90GB                                   13 (23%)        💩+6126.4% ±  0.2%
+  cpu_cycles          203M  ± 1.03M                                201M  …  206M                                     0 ( 0%)        ⚡- 24.4% ±  0.8%
+  instructions        241M  ± 10.2                                 241M  …  241M                                     0 ( 0%)        ⚡- 62.6% ±  0.0%
+  cache_references   6.78M  ±  362K                               6.10M  … 7.50M                                     0 ( 0%)        💩+175.6% ±  3.1%
+  cache_misses        242K  ± 9.98K                                226K  …  262K                                     0 ( 0%)        ⚡- 33.9% ±  1.0%
+  branch_misses       643K  ± 10.1K                                615K  …  671K                                     4 ( 7%)        ⚡- 10.7% ±  6.7%
+Benchmark 6 (732 runs): ./nix-nar/bin/nix-nar cat linux.nar /README
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          3.65s  ± 6.02ms                              3.64s  … 3.66s                                     0 ( 0%)        💩+438.2% ±  0.7%
-  peak_rss           1.85GB ± 67.4KB                              1.85GB … 1.85GB                                    0 ( 0%)        💩+1416.4% ±  0.1%
-  cpu_cycles          878M  ± 2.24M                                873M  …  882M                                     0 ( 0%)        ⚡- 40.5% ±  1.1%
-  instructions        870M  ± 10.2K                                870M  …  870M                                     0 ( 0%)        ⚡- 65.6% ±  0.0%
-  cache_references   4.38M  ±  218K                               4.22M  … 5.12M                                     1 ( 6%)        ⚡- 88.2% ±  3.4%
-  cache_misses        118K  ± 4.02K                                111K  …  125K                                     0 ( 0%)        ⚡- 99.0% ±  0.3%
-  branch_misses      1.70M  ± 27.7K                               1.65M  … 1.74M                                     0 ( 0%)        ⚡- 72.2% ±  6.0%
+  wall_time          81.9ms ± 1.88ms                              80.7ms …  107ms                                   87 (12%)        ⚡- 54.5% ±  0.2%
+  peak_rss           2.40MB ± 61.3KB                              2.28MB … 2.55MB                                    0 ( 0%)        ⚡- 92.1% ±  0.0%
+  cpu_cycles          116M  ± 3.04M                                114M  …  167M                                    50 ( 7%)        ⚡- 57.0% ±  0.3%
+  instructions        167M  ± 10.2K                                167M  …  167M                                     0 ( 0%)        ⚡- 74.0% ±  0.0%
+  cache_references   1.61M  ±  455K                                736K  … 3.69M                                    17 ( 2%)        ⚡- 34.4% ±  2.1%
+  cache_misses       21.4K  ± 2.19K                               18.3K  … 33.7K                                    65 ( 9%)        ⚡- 94.2% ±  0.3%
+  branch_misses       122K  ± 53.5K                                107K  …  979K                                    74 (10%)        ⚡- 83.0% ±  2.0%
+Benchmark 7 (16 runs): ./narz/bin/narz cat linux.nar /README
+  measurement          mean ± σ            min … max           outliers         delta
+  wall_time          3.76s  ± 12.0ms                              3.73s  … 3.78s                                     0 ( 0%)        💩+1986.8% ±  1.1%
+  peak_rss           1.86GB ± 67.2KB                              1.86GB … 1.86GB                                    0 ( 0%)        💩+6002.4% ±  0.3%
+  cpu_cycles          891M  ± 3.18M                                886M  …  897M                                     0 ( 0%)        💩+231.3% ±  1.5%
+  instructions        879M  ± 11.1K                                879M  …  879M                                     2 (13%)        💩+ 36.4% ±  0.0%
+  cache_references   4.81M  ±  489K                               4.14M  … 6.25M                                     4 (25%)        💩+ 95.9% ±  5.6%
+  cache_misses        122K  ± 4.77K                                114K  …  131K                                     0 ( 0%)        ⚡- 66.7% ±  1.9%
+  branch_misses      1.80M  ± 31.7K                               1.74M  … 1.86M                                     0 ( 0%)        💩+149.7% ± 12.6%
 
-poop -d 60000 "./nix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./lix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -L" "./nix-nar/bin/nix-nar cat linux.nar /virt/lib/irqbypass.c " "./narz/bin/narz cat linux.nar /virt/lib/irqbypass.c"
-Benchmark 1 (88 runs): ./nix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c
+poop -d 60000 "./nix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./lix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -f" "./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -L" "./nix-nar/bin/nix-nar cat linux.nar /virt/lib/irqbypass.c " "./narz/bin/narz cat linux.nar /virt/lib/irqbypass.c"
+Benchmark 1 (334 runs): ./nix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           684ms ± 13.1ms                               664ms …  711ms                                    0 ( 0%)        0%
-  peak_rss            122MB ±  171KB                               121MB …  122MB                                    0 ( 0%)        0%
-  cpu_cycles         1.49G  ± 42.7M                               1.44G  … 1.59G                                     0 ( 0%)        0%
-  instructions       2.53G  ±  694K                               2.53G  … 2.53G                                     3 ( 3%)        0%
-  cache_references   39.6M  ± 4.63M                               33.7M  … 60.0M                                     6 ( 7%)        0%
-  cache_misses       12.1M  ± 96.3K                               11.9M  … 12.4M                                     0 ( 0%)        0%
-  branch_misses      6.48M  ±  995K                               5.49M  … 8.50M                                     0 ( 0%)        0%
+  wall_time           180ms ± 2.65ms                               177ms …  194ms                                    6 ( 2%)        0%
+  peak_rss           30.5MB ±  174KB                              30.1MB … 31.1MB                                    1 ( 0%)        0%
+  cpu_cycles          269M  ± 7.73M                                262M  …  298M                                     2 ( 1%)        0%
+  instructions        644M  ±  114K                                644M  …  645M                                     2 ( 1%)        0%
+  cache_references   2.44M  ±  217K                               2.04M  … 3.37M                                    10 ( 3%)        0%
+  cache_misses        366K  ± 13.3K                                349K  …  444K                                    58 (17%)        0%
+  branch_misses       719K  ±  177K                                568K  … 1.47M                                     2 ( 1%)        0%
 Benchmark 2 (23 runs): ./lix/bin/nix nar cat linux.nar /virt/lib/irqbypass.c
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          2.61s  ± 10.6ms                              2.59s  … 2.64s                                     0 ( 0%)        💩+282.1% ±  0.9%
-  peak_rss           3.75GB ±  134KB                              3.75GB … 3.75GB                                    0 ( 0%)        💩+2984.4% ±  0.1%
-  cpu_cycles         2.99G  ± 21.3M                               2.96G  … 3.05G                                     0 ( 0%)        💩+100.5% ±  1.2%
-  instructions       2.21G  ± 7.96K                               2.21G  … 2.21G                                     0 ( 0%)        ⚡- 12.7% ±  0.0%
-  cache_references    130M  ± 6.12M                                127M  …  157M                                     2 ( 9%)        💩+227.7% ±  5.8%
-  cache_misses       71.7M  ±  138K                               71.5M  … 72.0M                                     0 ( 0%)        💩+492.5% ±  0.4%
-  branch_misses      4.43M  ±  518K                               3.83M  … 5.89M                                     0 ( 0%)        ⚡- 31.6% ±  6.6%
-Benchmark 3 (740 runs): ./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c
+  wall_time          2.69s  ± 12.7ms                              2.67s  … 2.72s                                     2 ( 9%)        💩+1393.6% ±  1.0%
+  peak_rss           3.79GB ± 97.7KB                              3.79GB … 3.79GB                                    0 ( 0%)        💩+12309.5% ±  0.2%
+  cpu_cycles         2.98G  ± 25.5M                               2.96G  … 3.06G                                     0 ( 0%)        💩+1008.8% ±  1.5%
+  instructions       2.23G  ± 8.77K                               2.23G  … 2.23G                                     0 ( 0%)        💩+246.6% ±  0.0%
+  cache_references    139M  ± 5.53M                                133M  …  159M                                     1 ( 4%)        💩+5585.7% ± 24.1%
+  cache_misses       72.4M  ±  144K                               72.1M  … 72.7M                                     0 ( 0%)        💩+19694.0% ±  4.4%
+  branch_misses      4.26M  ±  429K                               3.87M  … 5.52M                                     0 ( 0%)        💩+492.6% ± 11.9%
+Benchmark 3 (691 runs): ./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          81.1ms ±  525us                              80.6ms … 86.0ms                                   13 ( 2%)        ⚡- 88.1% ±  0.1%
-  peak_rss           1.04MB ±    0                                1.04MB … 1.04MB                                    0 ( 0%)        ⚡- 99.1% ±  0.0%
-  cpu_cycles         45.6M  ±  476K                               45.2M  … 48.8M                                    90 (12%)        ⚡- 96.9% ±  0.2%
-  instructions       94.4M  ± 4.36                                94.4M  … 94.4M                                     8 ( 1%)        ⚡- 96.3% ±  0.0%
-  cache_references    136K  ± 19.4K                               87.6K  …  201K                                    22 ( 3%)        ⚡- 99.7% ±  0.8%
-  cache_misses       4.80K  ± 1.07K                               3.29K  … 9.38K                                    64 ( 9%)        ⚡-100.0% ±  0.1%
-  branch_misses       380K  ± 3.98K                                376K  …  411K                                    83 (11%)        ⚡- 94.1% ±  1.1%
-Benchmark 4 (61 runs): ./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -L
+  wall_time          86.8ms ± 1.16ms                              86.2ms …  103ms                                   48 ( 7%)        ⚡- 51.8% ±  0.1%
+  peak_rss           1.04MB ±    0                                1.04MB … 1.04MB                                    0 ( 0%)        ⚡- 96.6% ±  0.0%
+  cpu_cycles         45.8M  ±  435K                               45.5M  … 50.2M                                    57 ( 8%)        ⚡- 83.0% ±  0.2%
+  instructions       95.5M  ± 5.12                                95.5M  … 95.5M                                    14 ( 2%)        ⚡- 85.2% ±  0.0%
+  cache_references    129K  ± 18.6K                               87.4K  …  185K                                    15 ( 2%)        ⚡- 94.7% ±  0.7%
+  cache_misses       5.30K  ± 1.21K                               3.77K  … 11.4K                                    61 ( 9%)        ⚡- 98.6% ±  0.3%
+  branch_misses       381K  ± 3.77K                                378K  …  425K                                    43 ( 6%)        ⚡- 47.0% ±  1.8%
+Benchmark 4 (691 runs): ./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -f
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           995ms ± 6.99ms                               983ms … 1.02s                                     1 ( 2%)        💩+ 45.4% ±  0.5%
-  peak_rss           1.88GB ± 52.5KB                              1.88GB … 1.88GB                                   12 (20%)        💩+1448.1% ±  0.0%
-  cpu_cycles          196M  ± 1.12M                                194M  …  199M                                     2 ( 3%)        ⚡- 86.9% ±  0.7%
-  instructions        238M  ± 8.47                                 238M  …  238M                                     2 ( 3%)        ⚡- 90.6% ±  0.0%
-  cache_references   6.12M  ±  267K                               5.60M  … 6.72M                                     0 ( 0%)        ⚡- 84.5% ±  2.9%
-  cache_misses        242K  ± 10.5K                                226K  …  269K                                     0 ( 0%)        ⚡- 98.0% ±  0.2%
-  branch_misses       605K  ± 7.32K                                597K  …  628K                                     5 ( 8%)        ⚡- 90.7% ±  3.9%
-Benchmark 5 (120 runs): ./nix-nar/bin/nix-nar cat linux.nar /virt/lib/irqbypass.c
+  wall_time          86.9ms ± 1.36ms                              86.2ms …  103ms                                   60 ( 9%)        ⚡- 51.7% ±  0.1%
+  peak_rss           1.04MB ±    0                                1.04MB … 1.04MB                                    0 ( 0%)        ⚡- 96.6% ±  0.0%
+  cpu_cycles         45.8M  ±  510K                               45.5M  … 50.7M                                    79 (11%)        ⚡- 83.0% ±  0.2%
+  instructions       95.5M  ± 5.31                                95.5M  … 95.5M                                    18 ( 3%)        ⚡- 85.2% ±  0.0%
+  cache_references    129K  ± 18.6K                               87.1K  …  201K                                    15 ( 2%)        ⚡- 94.7% ±  0.7%
+  cache_misses       5.37K  ± 1.21K                               3.88K  … 10.5K                                    65 ( 9%)        ⚡- 98.5% ±  0.3%
+  branch_misses       381K  ± 4.27K                                378K  …  434K                                    63 ( 9%)        ⚡- 46.9% ±  1.8%
+Benchmark 5 (57 runs): ./narser/bin/narser cat linux.nar /virt/lib/irqbypass.c -L
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time           504ms ± 4.49ms                               496ms …  523ms                                    2 ( 2%)        ⚡- 26.3% ±  0.4%
-  peak_rss           2.39MB ± 57.6KB                              2.28MB … 2.54MB                                    0 ( 0%)        ⚡- 98.0% ±  0.0%
-  cpu_cycles          897M  ± 12.1M                                881M  …  965M                                     7 ( 6%)        ⚡- 39.9% ±  0.5%
-  instructions       1.38G  ± 76.6K                               1.38G  … 1.38G                                     0 ( 0%)        ⚡- 45.3% ±  0.0%
-  cache_references   8.24M  ± 3.40M                               3.44M  … 23.4M                                     5 ( 4%)        ⚡- 79.2% ±  2.8%
-  cache_misses       45.5K  ± 6.40K                               36.2K  … 59.8K                                     0 ( 0%)        ⚡- 99.6% ±  0.1%
-  branch_misses      1.12M  ±  206K                                887K  … 1.90M                                     2 ( 2%)        ⚡- 82.6% ±  2.8%
-Benchmark 6 (17 runs): ./narz/bin/narz cat linux.nar /virt/lib/irqbypass.c
+  wall_time          1.06s  ± 6.69ms                              1.05s  … 1.08s                                     6 (11%)        💩+487.7% ±  0.6%
+  peak_rss           1.90GB ± 58.2KB                              1.90GB … 1.90GB                                    0 ( 0%)        💩+6127.0% ±  0.1%
+  cpu_cycles          203M  ±  934K                                202M  …  206M                                     0 ( 0%)        ⚡- 24.3% ±  0.7%
+  instructions        241M  ± 8.96                                 241M  …  241M                                     0 ( 0%)        ⚡- 62.6% ±  0.0%
+  cache_references   6.83M  ±  414K                               6.29M  … 8.22M                                     5 ( 9%)        💩+179.9% ±  2.9%
+  cache_misses        243K  ± 9.23K                                225K  …  265K                                     0 ( 0%)        ⚡- 33.6% ±  1.0%
+  branch_misses       642K  ± 10.6K                                619K  …  673K                                     2 ( 4%)        ⚡- 10.6% ±  6.4%
+Benchmark 6 (114 runs): ./nix-nar/bin/nix-nar cat linux.nar /virt/lib/irqbypass.c
   measurement          mean ± σ            min … max           outliers         delta
-  wall_time          3.68s  ± 8.02ms                              3.67s  … 3.70s                                     2 (12%)        💩+438.3% ±  1.0%
-  peak_rss           1.85GB ± 66.5KB                              1.85GB … 1.85GB                                    0 ( 0%)        💩+1416.8% ±  0.1%
-  cpu_cycles          881M  ± 3.08M                                875M  …  887M                                     0 ( 0%)        ⚡- 41.0% ±  1.4%
-  instructions        870M  ± 11.1K                                870M  …  870M                                     0 ( 0%)        ⚡- 65.6% ±  0.0%
-  cache_references   4.80M  ±  289K                               4.35M  … 5.31M                                     0 ( 0%)        ⚡- 87.9% ±  5.7%
-  cache_misses        117K  ± 4.21K                                111K  …  124K                                     0 ( 0%)        ⚡- 99.0% ±  0.4%
-  branch_misses      1.75M  ± 40.0K                               1.69M  … 1.81M                                     0 ( 0%)        ⚡- 73.0% ±  7.4%
+  wall_time           528ms ± 4.64ms                               522ms …  554ms                                    5 ( 4%)        💩+193.5% ±  0.4%
+  peak_rss           2.40MB ± 57.0KB                              2.27MB … 2.54MB                                    0 ( 0%)        ⚡- 92.2% ±  0.1%
+  cpu_cycles          902M  ± 10.3M                                890M  …  955M                                     7 ( 6%)        💩+235.6% ±  0.7%
+  instructions       1.40G  ± 80.3K                               1.40G  … 1.40G                                     0 ( 0%)        💩+117.3% ±  0.0%
+  cache_references   9.39M  ± 3.29M                               4.88M  … 27.3M                                     7 ( 6%)        💩+284.7% ± 14.5%
+  cache_misses       45.4K  ± 6.52K                               34.4K  … 61.1K                                     0 ( 0%)        ⚡- 87.6% ±  0.7%
+  branch_misses      1.04M  ±  160K                                889K  … 1.62M                                     6 ( 5%)        💩+ 44.8% ±  5.1%
+Benchmark 7 (17 runs): ./narz/bin/narz cat linux.nar /virt/lib/irqbypass.c
+  measurement          mean ± σ            min … max           outliers         delta
+  wall_time          3.74s  ± 5.70ms                              3.73s  … 3.75s                                     3 (18%)        💩+1979.4% ±  0.8%
+  peak_rss           1.86GB ± 61.6KB                              1.86GB … 1.86GB                                    0 ( 0%)        💩+6003.1% ±  0.3%
+  cpu_cycles          889M  ± 2.83M                                884M  …  896M                                     0 ( 0%)        💩+230.7% ±  1.4%
+  instructions        879M  ± 13.2K                                879M  …  879M                                     0 ( 0%)        💩+ 36.4% ±  0.0%
+  cache_references   5.52M  ±  711K                               4.42M  … 6.46M                                     0 ( 0%)        💩+126.1% ±  5.2%
+  cache_misses        117K  ± 4.78K                                109K  …  127K                                     0 ( 0%)        ⚡- 67.9% ±  1.7%
+  branch_misses      1.77M  ± 38.3K                               1.69M  … 1.82M                                     0 ( 0%)        💩+145.7% ± 11.7%
 
 ./nix/bin/nix-store --restore out < linux.nar
 cmp <(./nix/bin/nix nar pack out) linux.nar
@@ -415,48 +433,48 @@ rm -rf out
 
 rm -rf out ; time ./nix/bin/nix-store --restore out < linux.nar
 
-real	0m1.479s
-user	0m0.342s
-sys	0m1.122s
+real	0m1.524s
+user	0m0.352s
+sys	0m1.164s
 rm -rf out ; time ./nix/bin/nix-store --restore out < linux.nar
 
-real	0m1.472s
-user	0m0.289s
-sys	0m1.171s
+real	0m1.515s
+user	0m0.316s
+sys	0m1.194s
 rm -rf out ; time ./nix/bin/nix-store --restore out < linux.nar
 
-real	0m1.497s
-user	0m0.318s
-sys	0m1.172s
+real	0m1.517s
+user	0m0.352s
+sys	0m1.158s
 
 rm -rf out ; time ./lix/bin/nix-store --restore out < linux.nar
 
-real	0m1.705s
-user	0m0.469s
-sys	0m1.228s
+real	0m1.726s
+user	0m0.489s
+sys	0m1.227s
 rm -rf out ; time ./lix/bin/nix-store --restore out < linux.nar
 
-real	0m1.688s
-user	0m0.458s
-sys	0m1.217s
+real	0m1.729s
+user	0m0.506s
+sys	0m1.213s
 rm -rf out ; time ./lix/bin/nix-store --restore out < linux.nar
 
-real	0m1.684s
-user	0m0.454s
-sys	0m1.219s
+real	0m1.731s
+user	0m0.544s
+sys	0m1.176s
 
 rm -rf out ; time ./narser/bin/narser unpack linux.nar out
 
-real	0m1.276s
-user	0m0.178s
-sys	0m1.091s
+real	0m1.339s
+user	0m0.186s
+sys	0m1.146s
 rm -rf out ; time ./narser/bin/narser unpack linux.nar out
 
-real	0m1.281s
-user	0m0.176s
-sys	0m1.100s
+real	0m1.320s
+user	0m0.203s
+sys	0m1.111s
 rm -rf out ; time ./narser/bin/narser unpack linux.nar out
 
-real	0m1.284s
-user	0m0.200s
-sys	0m1.078s
+real	0m1.321s
+user	0m0.203s
+sys	0m1.112s
