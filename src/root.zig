@@ -488,14 +488,14 @@ pub const NixArchive = struct {
             .name_pool = undefined,
         };
         const arena = self.arena.allocator();
-        self.name_pool = .init(self.arena.allocator());
-        self.pool = .init(self.arena.allocator());
+        self.name_pool = .empty;
+        self.pool = .empty;
         errdefer self.deinit();
 
         var iter: UnpackIterator = .init(reader);
         defer iter.deinit(allocator);
 
-        var current = try self.pool.create();
+        var current = try self.pool.create(arena);
         current.* = .{
             .data = undefined,
             .entry = null,
@@ -549,10 +549,10 @@ pub const NixArchive = struct {
             },
             .first_entry => {
                 if (try iter.next(allocator)) |child| {
-                    const next = try self.pool.create();
+                    const next = try self.pool.create(arena);
                     current.data.directory = next;
                     current_entry = child;
-                    const child_name = try self.name_pool.create();
+                    const child_name = try self.name_pool.create(arena);
                     @memcpy(child_name[0..child.name.len], child.name);
                     next.* = .{
                         .data = undefined,
@@ -602,8 +602,8 @@ pub const NixArchive = struct {
                 if (try iter.next(allocator)) |next_entry| {
                     current_entry = next_entry;
 
-                    const next = try self.pool.create();
-                    const next_name = try self.name_pool.create();
+                    const next = try self.pool.create(arena);
+                    const next_name = try self.name_pool.create(arena);
                     @memcpy(next_name[0..next_entry.name.len], next_entry.name);
 
                     current.entry.?.next = next;
@@ -638,18 +638,19 @@ pub const NixArchive = struct {
 
     /// Converts the contents of a directory into a Nix archive. The directory passed must be
     /// opened with iteration capabilities.
-    pub fn fromDirectory(allocator: std.mem.Allocator, root: std.fs.Dir) !NixArchive {
+    pub fn fromDirectory(allocator: std.mem.Allocator, io: std.Io, root: std.fs.Dir) !NixArchive {
         var self: NixArchive = .{
             .arena = .init(allocator),
             .pool = undefined,
             .root = undefined,
             .name_pool = undefined,
         };
-        self.name_pool = .init(self.arena.allocator());
-        self.pool = .init(self.arena.allocator());
+        const arena = self.arena.allocator();
+        self.name_pool = .empty;
+        self.pool = .empty;
         errdefer self.deinit();
 
-        const root_node = try self.pool.create();
+        const root_node = try self.pool.create(arena);
         root_node.* = .{
             .entry = null,
             .data = .{ .directory = null },
@@ -677,10 +678,10 @@ pub const NixArchive = struct {
             const entry = try cur.iterator.next();
 
             if (entry) |e| {
-                const next = try self.pool.create();
+                const next = try self.pool.create(arena);
                 next.*.entry = .{
                     .parent = cur.object,
-                    .name = try self.arena.allocator().dupe(u8, e.name),
+                    .name = try arena.dupe(u8, e.name),
                 };
                 switch (e.kind) {
                     .directory => {
@@ -705,7 +706,7 @@ pub const NixArchive = struct {
 
                         const stat = try file.stat();
 
-                        var fr = file.reader(&.{});
+                        var fr = file.reader(io, &.{});
 
                         var aw: std.Io.Writer.Allocating = .init(self.arena.allocator());
                         while (try fr.interface.streamRemaining(&aw.writer) != 0) {}
@@ -732,13 +733,13 @@ pub const NixArchive = struct {
         contents: []const u8,
         is_executable: bool,
     ) std.mem.Allocator.Error!NixArchive {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        var pool = std.heap.MemoryPool(Object).init(arena.allocator());
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        var pool: std.heap.MemoryPool(Object) = .empty;
         errdefer arena.deinit();
 
         const copy = try arena.allocator().dupe(u8, contents);
 
-        const node = try pool.create();
+        const node = try pool.create(arena.allocator());
 
         node.* = .{
             .entry = null,
@@ -749,7 +750,7 @@ pub const NixArchive = struct {
             .arena = arena,
             .pool = pool,
             .root = node,
-            .name_pool = .init(arena.allocator()),
+            .name_pool = .empty,
         };
     }
 
@@ -758,11 +759,11 @@ pub const NixArchive = struct {
         allocator: std.mem.Allocator,
         target: []const u8,
     ) std.mem.Allocator.Error!NixArchive {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        var pool = std.heap.MemoryPool(Object).init(arena.allocator());
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        var pool: std.heap.MemoryPool(Object) = .empty;
         errdefer arena.deinit();
 
-        const node = try pool.create();
+        const node = try pool.create(arena.allocator());
 
         const copy = try arena.allocator().dupe(u8, target);
 
@@ -775,7 +776,7 @@ pub const NixArchive = struct {
             .arena = arena,
             .pool = pool,
             .root = node,
-            .name_pool = .init(arena.allocator()),
+            .name_pool = .empty,
         };
     }
 
@@ -884,6 +885,7 @@ pub const NixArchive = struct {
     /// memory-efficient than calling `fromDirectory` followed by `pack`.
     pub fn packDirectory(
         allocator: std.mem.Allocator,
+        io: std.Io,
         dir: std.fs.Dir,
         writer: *std.Io.Writer,
     ) !void {
@@ -891,8 +893,8 @@ pub const NixArchive = struct {
         // in reverse. Reading the next node is as easy as popping. `dir_indicies` is to keep track
         // of where the contents of each directory end.
 
-        var node_names: std.heap.MemoryPoolAligned([std.fs.max_name_bytes]u8, .@"64") = .init(allocator);
-        defer node_names.deinit();
+        var node_names: std.heap.MemoryPoolAligned([std.fs.max_name_bytes]u8, .@"64") = .empty;
+        defer node_names.deinit(allocator);
 
         var nodes: std.MultiArrayList(struct {
             kind: std.meta.Tag(Object.Data),
@@ -926,7 +928,7 @@ pub const NixArchive = struct {
                 while (try last_iter.next()) |entry| {
                     try nodes.append(allocator, .{
                         .name = blk: {
-                            var name = try node_names.create();
+                            var name = try node_names.create(allocator);
                             @memcpy(name[0..entry.name.len], entry.name);
                             break :blk name[0..entry.name.len];
                         },
@@ -975,7 +977,7 @@ pub const NixArchive = struct {
                                 try Token.write(writer, &.{.executable_file});
                             try Token.write(writer, &.{.file_contents});
 
-                            var fr = file.reader(&.{});
+                            var fr = file.reader(io, &.{});
 
                             if (fr.getSize()) |size| {
                                 try writer.writeInt(u64, size, .little);
@@ -1429,11 +1431,12 @@ test "a symlink" {
 
 test "nar from dir-and-files" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var root = try std.fs.cwd().openDir(tests_path ++ "/dir-and-files", .{ .iterate = true });
     defer root.close();
 
-    var data = try NixArchive.fromDirectory(allocator, root);
+    var data = try NixArchive.fromDirectory(allocator, io, root);
     defer data.deinit();
 
     const dir = data.root.data.directory.?;
@@ -1459,13 +1462,14 @@ test "nar from dir-and-files" {
 
 test "empty directory" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     std.fs.cwd().makeDir(tests_path ++ "/empty") catch {};
 
     var root = try std.fs.cwd().openDir(tests_path ++ "/empty", .{ .iterate = true });
     defer root.close();
 
-    var data = try NixArchive.fromDirectory(allocator, root);
+    var data = try NixArchive.fromDirectory(allocator, io, root);
     defer data.deinit();
 
     try std.testing.expectEqual(null, data.root.data.directory);
@@ -1492,6 +1496,7 @@ test "nar to directory to nar" {
 
 test "more complex" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     std.fs.cwd().makeDir(tests_path ++ "/complex/empty") catch {};
 
@@ -1506,9 +1511,9 @@ test "more complex" {
     const writer = &fixed;
 
     {
-        try NixArchive.packDirectory(allocator, root, writer);
+        try NixArchive.packDirectory(allocator, io, root, writer);
 
-        var archive = try NixArchive.fromDirectory(allocator, root);
+        var archive = try NixArchive.fromDirectory(allocator, io, root);
         defer archive.deinit();
 
         try archive.toWriter(writer);
@@ -1524,9 +1529,9 @@ test "more complex" {
         var empty = try root.openDir("empty", .{ .iterate = true });
         defer empty.close();
 
-        try NixArchive.packDirectory(allocator, empty, writer);
+        try NixArchive.packDirectory(allocator, io, empty, writer);
 
-        var archive = try NixArchive.fromDirectory(allocator, empty);
+        var archive = try NixArchive.fromDirectory(allocator, io, empty);
         defer archive.deinit();
 
         try archive.toWriter(writer);

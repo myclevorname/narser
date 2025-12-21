@@ -3,7 +3,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     zig-src = {
-      url = "github:ziglang/zig";
+      url = "git+https://codeberg.org/ziglang/zig";
       flake = false;
     };
   };

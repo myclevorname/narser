@@ -183,6 +183,9 @@ const OptsIter = struct {
 };
 
 pub fn main() !void {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    const io = threaded.ioBasic();
+
     const stdout = std.fs.File.stdout();
     var stdout_buffer: [4096 * 64]u8 = undefined;
     var fw = stdout.writer(&stdout_buffer);
@@ -242,7 +245,7 @@ pub fn main() !void {
         var in_buf: [8192]u8 = undefined;
 
         if (std.mem.eql(u8, "-", argument)) {
-            var fr = std.fs.File.stdin().reader(&in_buf);
+            var fr = std.fs.File.stdin().reader(io, &in_buf);
             try narser.NixArchive.packFile(
                 allocator,
                 &fr.interface,
@@ -262,12 +265,12 @@ pub fn main() !void {
                     .directory => {
                         var dir = try std.fs.cwd().openDir(argument, .{ .iterate = true });
                         defer dir.close();
-                        try narser.NixArchive.packDirectory(allocator, dir, used_writer);
+                        try narser.NixArchive.packDirectory(allocator, io, dir, used_writer);
                     },
                     else => {
                         var file = try std.fs.cwd().openFile(argument, .{});
                         defer file.close();
-                        var fr = file.reader(&in_buf);
+                        var fr = file.reader(io, &in_buf);
                         try narser.NixArchive.packFile(
                             allocator,
                             &fr.interface,
@@ -293,7 +296,7 @@ pub fn main() !void {
         defer in_file.close();
 
         var in_buf: [8192]u8 = undefined;
-        var in_reader = in_file.reader(&in_buf);
+        var in_reader = in_file.reader(io, &in_buf);
 
         const subpath = if (processed_args.items.len < 3) "/" else processed_args.items[2];
 
@@ -317,7 +320,7 @@ pub fn main() !void {
         defer in_file.close();
 
         var in_buf: [8192]u8 = undefined;
-        var in_reader = in_file.reader(&in_buf);
+        var in_reader = in_file.reader(io, &in_buf);
 
         if (!opts.follow) {
             var iter: narser.NixArchive.UnpackIterator = .init(&in_reader.interface);
@@ -397,7 +400,7 @@ pub fn main() !void {
         var file = try std.fs.cwd().openFile(archive_path, .{});
         defer file.close();
         var fbuf: [4096 * 64]u8 = undefined;
-        var fr = file.reader(&fbuf);
+        var fr = file.reader(io, &fbuf);
         const reader = &fr.interface;
 
         const kind = narser.NixArchive.peekType(reader) catch |e| switch (e) {
