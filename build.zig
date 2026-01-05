@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "lib", .module = narser }},
         }),
     });
+    exe.use_new_linker = false;
 
     b.installFile("src/_narser.bash", "share/bash-completion/completions/narser");
     if (no_bin)
@@ -58,12 +59,14 @@ pub fn build(b: *std.Build) void {
     const narser_unit_tests = b.addTest(.{
         .root_module = narser,
     });
+    narser_unit_tests.use_new_linker = false;
 
     const run_narser_unit_tests = b.addRunArtifact(narser_unit_tests);
 
     const exe_unit_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    exe_unit_tests.use_new_linker = false;
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
