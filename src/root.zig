@@ -443,6 +443,10 @@ pub const NixArchive = struct {
     pub const PackIterator = struct {
         writer: *std.Io.Writer,
         names: UnpackIterator.Names,
+        /// For the writer given by `.writer()`
+        current_limit: ?u64,
+        written: u64,
+        file_writer: std.Io.Writer,
 
         pub const Entry = struct {
             name: []const u8,
@@ -453,12 +457,13 @@ pub const NixArchive = struct {
             return .{
                 .writer = writer,
                 .names = .empty,
+                .current_limit = null,
+                .written = undefined,
+                .file_writer = .{
+                    .buffer = &.{},
+                    .vtable = &.{ .drain = drain },
+                },
             };
-        }
-
-        /// TODO: Come up with a better name
-        pub fn putWritten(iter: PackIterator, len: u64) !void {
-            try Token.writePadding(iter.writer, len);
         }
 
         pub fn leaveDirectory(iter: *PackIterator) !void {
@@ -490,8 +495,10 @@ pub const NixArchive = struct {
             }
         }
 
+        /// For symlinks and files, use `.write()` afterwards.
         pub fn next(iter: *PackIterator, allocator: std.mem.Allocator, entry: Entry) !void {
             std.debug.assert(iter.names.items.len > 0);
+            if (iter.current_limit) |l| std.debug.assert(l == iter.written);
             if (entry.kind == .directory) try iter.names.ensureUnusedCapacity(allocator, 1);
             const prev = &iter.names.items[iter.names.items.len - 1];
             const prev_name = prev.name[0..prev.len];
@@ -512,6 +519,49 @@ pub const NixArchive = struct {
                 .file => try Token.write(iter.writer, &.{.file}),
                 .executable_file => try Token.write(iter.writer, &.{.executable_file}),
                 .symlink => try Token.write(iter.writer, &.{.symlink}),
+            }
+        }
+
+        pub fn write(iter: *PackIterator, len: u64) !*std.Io.Writer {
+            std.debug.assert(iter.current_limit == null);
+            try iter.writer.writeInt(u64, len, .little);
+            iter.current_limit = len;
+            iter.written = 0;
+            return &iter.file_writer;
+        }
+
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) !usize {
+            const iter: *PackIterator = @fieldParentPtr("file_writer", w);
+            if (iter.current_limit == null) return error.WriteFailed;
+
+            const left = iter.current_limit.? - iter.written;
+            var total: usize = 0;
+
+            if (left == 0) {
+                const l = iter.current_limit.?;
+                try iter.writer.rebase(0, Token.toString(.directory_entry_end).len + Token.padding(l));
+                Token.writePadding(iter.writer, l) catch unreachable;
+                Token.write(iter.writer, &.{.directory_entry_end}) catch unreachable;
+                iter.current_limit = null;
+                iter.written = undefined;
+                return error.WriteFailed;
+            }
+
+            for (data[0 .. data.len - 1], 0..) |s, i| {
+                if (s.len + total > left) {
+                    const amount_written = try iter.writer.writeVec(data[0 .. i - 1]);
+                    iter.written += amount_written;
+                    return amount_written;
+                }
+                total += s.len;
+            } else {
+                const last = data[data.len - 1];
+                const amount_written = if (last.len == 0)
+                    try iter.writer.writeVec(data[0..data.len -| 1])
+                else
+                    try iter.writer.writeSplat(data, @min(splat, (left - total) / last.len));
+                iter.written += amount_written;
+                return amount_written;
             }
         }
     };
@@ -875,22 +925,22 @@ pub const NixArchive = struct {
         switch (node.data) {
             .file => |c| {
                 try iter.first(null, .file);
-                try iter.writer.writeAll(c);
-                try iter.putWritten(c.len);
+                const w = try iter.write(c.len);
+                try w.writeAll(c);
                 try iter.finish();
                 return;
             },
             .executable_file => |c| {
                 try iter.first(null, .executable_file);
-                try iter.writer.writeAll(c);
-                try iter.putWritten(c.len);
+                const w = try iter.write(c.len);
+                try w.writeAll(c);
                 try iter.finish();
                 return;
             },
             .symlink => |target| {
                 try iter.first(null, .symlink);
-                try iter.writer.writeAll(target);
-                try iter.putWritten(target.len);
+                const w = try iter.write(target.len);
+                try w.writeAll(target);
                 try iter.finish();
                 return;
             },
