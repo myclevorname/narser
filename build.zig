@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
     const no_bin = b.option(bool, "no-bin", "Don't generate a binary (useful with -fincremental)") orelse false;
     const strip = b.option(bool, "strip", "Remove debugging symbols");
     const emit_docs = b.option(bool, "emit-docs", "Generate usage documentation") orelse false;
+    const new_linker = b.option(bool, "new-linker", "Whether to use Elf/lld or Elf2");
 
     if (target.result.os.tag == .windows or target.result.os.tag == .wasi)
         @panic("Target OS does not support the executable file attribute.");
@@ -33,6 +34,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "lib", .module = narser }},
         }),
     });
+    exe.use_new_linker = new_linker;
 
     b.installFile("src/_narser.bash", "share/bash-completion/completions/narser");
     if (no_bin)
@@ -58,12 +60,14 @@ pub fn build(b: *std.Build) void {
     const narser_unit_tests = b.addTest(.{
         .root_module = narser,
     });
+    narser_unit_tests.use_new_linker = new_linker;
 
     const run_narser_unit_tests = b.addRunArtifact(narser_unit_tests);
 
     const exe_unit_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
+    exe_unit_tests.use_new_linker = new_linker;
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

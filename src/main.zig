@@ -117,7 +117,7 @@ fn printPath(node: *const narser.NixArchive.Object, writer: *std.Io.Writer, long
 
 const OptsIter = struct {
     current: ?[]const u8,
-    iter: *std.process.ArgIterator,
+    iter: *std.process.Args.Iterator,
     finished_options: bool = false,
     in_option: bool = false,
 
@@ -126,7 +126,7 @@ const OptsIter = struct {
         argument: []const u8,
     };
 
-    fn init(iter: *std.process.ArgIterator) OptsIter {
+    fn init(iter: *std.process.Args.Iterator) OptsIter {
         return .{ .iter = iter, .current = iter.next() };
     }
 
@@ -182,7 +182,7 @@ const OptsIter = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(juice: std.process.Init.Minimal) !void {
     var threaded: std.Io.Threaded = .init_single_threaded;
     const io = threaded.ioBasic();
 
@@ -195,9 +195,8 @@ pub fn main() !void {
 
     const allocator = arena.allocator();
 
-    var args = try std.process.ArgIterator.initWithAllocator(allocator);
-    //defer args.deinit();
-    _ = args.skip();
+    var args = juice.args.iterate();
+    std.debug.assert(args.skip());
 
     var processed_args: std.ArrayList([]const u8) = .empty;
     //defer processed_args.deinit(allocator);
