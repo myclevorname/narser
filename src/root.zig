@@ -62,6 +62,15 @@ pub const NixArchive = struct {
                     .symlink, .directory => false,
                 };
             }
+
+            pub fn toToken(k: Kind) Token {
+                return switch (k) {
+                    .file => .file,
+                    .executable_file => .executable_file,
+                    .symlink => .symlink,
+                    .directory => .directory,
+                };
+            }
         };
 
         /// Makes the child a child of the parent object. Asserts the object is a directory.
@@ -168,11 +177,14 @@ pub const NixArchive = struct {
     pub const UnpackIterator = struct {
         reader: *std.Io.Reader,
         names: Names,
+        in_reader: bool = false,
 
         pub const Names = std.ArrayList(struct {
             name: [std.fs.max_name_bytes]u8,
             len: Name,
         });
+
+        pub const PathSafety = enum { allow, deny };
 
         pub const Entry = struct {
             /// Invalidated upon `.skip` or `.take`
@@ -180,254 +192,138 @@ pub const NixArchive = struct {
             kind: Object.Kind,
         };
 
-        pub const Contents = union(Object.Kind) {
-            file,
-            executable_file,
-            /// Invalidated upon `.skip` or `.take`
-            symlink: []const u8,
-            directory,
-        };
-
         pub fn init(reader: *std.Io.Reader) UnpackIterator {
-            std.debug.assert(reader.buffer.len >= std.fs.max_path_bytes +
-                Token.toString(.directory_entry_end).len);
+            std.debug.assert(reader.buffer.len >= min_buffer_size);
             return .{
                 .reader = reader,
                 .names = .empty,
             };
         }
 
-        pub fn deinit(self: *UnpackIterator, allocator: std.mem.Allocator) void {
-            self.names.deinit(allocator);
-            self.* = undefined;
+        pub fn deinit(iter: *UnpackIterator, allocator: std.mem.Allocator) void {
+            iter.names.deinit(allocator);
+            iter.* = undefined;
         }
 
-        /// Get the contents of the root node. Depending on the type, the following will happen:
-        ///
-        /// `.file`, `.executable_file`: Stream the contents into the writer
-        /// `.directory`: Enter the directory, asserting `depth_hint` is nonzero.
-        /// `.symlink`: Return the slice
-        pub fn first(
-            self: *UnpackIterator,
-            allocator: ?std.mem.Allocator,
-            writer: ?*std.Io.Writer,
-        ) !Contents {
-            const kind = try peekType(self.reader);
-
-            std.debug.assert((kind.isFile()) == (writer != null));
-
-            Token.expect(self.reader, .magic) catch unreachable;
-
+        pub fn first(iter: *UnpackIterator) !Object.Kind {
+            const kind = try peekType(iter.reader);
+            Token.expect(iter.reader, .magic) catch unreachable;
             switch (kind) {
-                .file => {
-                    Token.expect(self.reader, .file) catch unreachable;
+                inline else => |t| Token.expect(iter.reader, t.toToken()) catch unreachable,
+            }
+            return kind;
+        }
 
-                    const len = try self.reader.takeInt(u64, .little);
-                    try self.reader.streamExact64(writer.?, len);
-                    if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
-                        return error.InvalidPadding;
-
-                    return .file;
+        pub fn takeFile(iter: *UnpackIterator, buffer: []u8) Reader {
+            std.debug.assert(!iter.in_reader);
+            iter.in_reader = true;
+            return .{
+                .iter = &iter,
+                .reader = .{
+                    .buffer = buffer,
+                    .vtable = &.{ .stream = stream },
                 },
-                .executable_file => {
-                    Token.expect(self.reader, .executable_file) catch unreachable;
+            };
+        }
 
-                    const len = try self.reader.takeInt(u64, .little);
-                    try self.reader.streamExact64(writer.?, len);
-                    if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
-                        return error.InvalidPadding;
+        pub fn takeSymlink(iter: *UnpackIterator, buffer: []u8) ![]u8 {
+            const len = try iter.reader.takeInt(u64, .little);
+            if (len > buffer.len) return error.Overflow;
+            const ret = try iter.reader.readAll(buffer);
+            if (!std.mem.allEqual(u8, try iter.reader.take(Token.padding(len)), 0))
+                return error.InvalidPadding;
+            if (iter.names.items.len > 0) try Token.expect(iter.reader, .directory_entry_end);
+            return ret;
+        }
 
-                    return .executable_file;
-                },
-                .symlink => {
-                    Token.expect(self.reader, .symlink) catch unreachable;
-                    const target = try Token.takeTarget(self.reader);
-                    return .{ .symlink = target };
-                },
+        pub fn takeDirectory(iter: *UnpackIterator, allocator: std.mem.Allocator) !void {
+            const child = try iter.names.addOne(allocator);
+            child.len = 0;
+        }
+
+        /// Skip a file, returning its size.
+        pub fn skipFile(iter: *UnpackIterator) !u64 {
+            const size = try iter.reader.take(u64, .little);
+            try iter.reader.discardAll64(size);
+
+            if (!std.mem.allEqual(u8, try iter.reader.take(Token.padding(size)), 0))
+                return error.InvalidPadding;
+
+            if (iter.names.items.len > 0) try Token.expect(iter.reader, .directory_entry_end);
+            return size;
+        }
+
+        /// Skip a symlink, returning its size.
+        pub const skipSymlink = skipFile;
+
+        pub fn skip(
+            iter: *UnpackIterator,
+            allocator: std.mem.Allocator,
+            kind: Object.Kind,
+            safety: PathSafety,
+        ) !void {
+            switch (kind) {
+                .file, .executable_file => _ = try iter.skipFile(),
+                .symlink => _ = try iter.skipSymlink(),
                 .directory => {
-                    Token.expect(self.reader, .directory) catch unreachable;
-                    const first_name = try self.names.addOne(allocator.?);
-                    first_name.len = 0;
-                    std.debug.assert(first_name == &self.names.items[0]);
-                    return .directory;
+                    const depth = iter.names.items.len;
+                    try iter.enterDirectory(allocator);
+                    while (iter.names.items.len != depth) if (try iter.next(safety)) |e|
+                        switch (e.kind) {
+                            .file, .executable_file => _ = try iter.skipFile(),
+                            .symlink => _ = try iter.skipSymlink(),
+                            .directory => try iter.enterDirectory(allocator),
+                        };
                 },
             }
         }
 
         /// Get the next entry within the current directory. `null` means leaving a directory.
-        /// Name invalidated upon calling `next` or `finish`.
-        pub fn next(self: *UnpackIterator, allocator: std.mem.Allocator) !?Entry {
-            if (try Token.take(self.reader, .directory_entry)) {
-                // We may return a directory, in which case self.names may reallocate.
-                try self.names.ensureUnusedCapacity(allocator, 1);
-
-                const prev_buf = &self.names.items[self.names.items.len - 1];
-                const prev = prev_buf.name[0..prev_buf.len];
-
-                const next_name = try Token.takeName(self.reader);
-
-                if (std.mem.indexOfScalar(u8, next_name, 0) != null or
-                    std.mem.indexOfScalar(u8, next_name, '/') != null or
-                    std.mem.eql(u8, next_name, ".") or
-                    std.mem.eql(u8, next_name, ".."))
-                {
-                    return error.MaliciousArchive;
-                }
-
-                switch (std.mem.order(u8, prev, next_name)) {
+        /// Name invalidated upon calling `skip`, `enterDirectory`, or `finish`.
+        pub fn next(iter: *UnpackIterator, safety: PathSafety) !?Entry {
+            std.debug.assert(iter.names.items.len != 0);
+            if (try Token.take(iter.reader, .directory_entry)) {
+                const name = try Token.takeName(iter.reader);
+                const last = &iter.names.items[iter.names.items.len - 1];
+                switch (std.mem.order(
+                    u8,
+                    iter.names.items[iter.names.items.len - 1].toString(),
+                    name,
+                )) {
                     .lt => {},
                     .eq => return error.DuplicateObjectName,
                     .gt => return error.WrongDirectoryOrder,
                 }
-                @memcpy(prev_buf.name[0..next_name.len], next_name);
-                prev_buf.len = @intCast(next_name.len);
+                @memcpy(last[0..name.len], name);
+                last.len = name.len;
+                if (safety == .deny)
+                    if (std.mem.indexOfScalar(u8, name, 0) != null or
+                        std.mem.indexOfScalar(u8, name, '/') != null or
+                        std.mem.eql(u8, name, ".") or
+                        std.mem.eql(u8, name, ".."))
+                        return error.ForbiddenName;
 
-                try Token.expect(self.reader, .directory_entry_inner);
-                const kind: std.meta.Tag(Object.Data) = if (try Token.take(self.reader, .file))
+                try Token.expect(iter.reader, .directory_entry_inner);
+
+                const kind: Object.Kind = if (try Token.take(iter.reader, .file))
                     .file
-                else if (try Token.take(self.reader, .executable_file))
+                else if (try Token.take(iter.reader, .executable_file))
                     .executable_file
-                else if (try Token.take(self.reader, .directory))
+                else if (try Token.take(iter.reader, .directory))
                     .directory
-                else if (try Token.take(self.reader, .symlink))
+                else if (try Token.take(iter.reader, .symlink))
                     .symlink
                 else
                     return error.InvalidToken;
+
                 return .{
+                    .name = last.name[0..last.len],
                     .kind = kind,
-                    .name = prev_buf.name[0..next_name.len],
                 };
             } else {
-                if (self.names.items.len > 1) try Token.expect(self.reader, .directory_entry_end);
-                _ = self.names.pop().?;
+                iter.names.items.len -= 1;
                 return null;
             }
-        }
-
-        /// Skip the current entry and its contents, invalidating the entry.
-        pub fn skip(self: *UnpackIterator, allocator: std.mem.Allocator, entry: Entry) !void {
-            std.debug.assert(self.names.items.len != 0);
-            const State = enum {
-                start,
-                file,
-                symlink,
-                next,
-            };
-
-            const depth = self.names.items.len;
-
-            state: switch (State.start) {
-                .start => switch (entry.kind) {
-                    .file, .executable_file => continue :state .file,
-                    .symlink => continue :state .symlink,
-                    .directory => {
-                        const child = self.names.addOneAssumeCapacity();
-                        child.len = 0;
-                        continue :state .next;
-                    },
-                },
-                .file => {
-                    const len = try self.reader.takeInt(u64, .little);
-                    try self.reader.discardAll64(len);
-                    const zeroes = try self.reader.take(Token.padding(len));
-                    if (!std.mem.allEqual(u8, zeroes, 0))
-                        return error.InvalidPadding;
-                    try Token.expect(self.reader, .directory_entry_end);
-                    continue :state .next;
-                },
-                .symlink => {
-                    _ = try Token.takeTarget(self.reader);
-                    try Token.expect(self.reader, .directory_entry_end);
-                    continue :state .next;
-                },
-                .next => {
-                    if (self.names.items.len == depth) return;
-                    if (try self.next(allocator)) |e| {
-                        switch (e.kind) {
-                            .file, .executable_file => continue :state .file,
-                            .symlink => continue :state .symlink,
-                            .directory => {
-                                std.debug.assert(try self.take(e, null) == .directory);
-                                continue :state .next;
-                            },
-                        }
-                    } else {
-                        continue :state .next;
-                    }
-                },
-            }
-            comptime unreachable;
-        }
-
-        /// Take the current entry's contents. Depending on the entry, the following will happen:
-        ///
-        /// `.file`, `.executable_file`: Stream the contents into the writer
-        /// `.directory`: Enter the directory
-        /// `.symlink`: Return the slice
-        pub fn take(self: *UnpackIterator, entry: Entry, writer: ?*std.Io.Writer) !Contents {
-            std.debug.assert((entry.kind.isFile()) == (writer != null));
-            switch (entry.kind) {
-                .directory => {
-                    const child = self.names.addOneAssumeCapacity();
-                    child.len = 0;
-                    return .directory;
-                },
-                inline .file, .executable_file => |tag| {
-                    const len = try self.reader.takeInt(u64, .little);
-                    try self.reader.streamExact64(writer.?, len);
-                    if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
-                        return error.InvalidPadding;
-
-                    try Token.expect(self.reader, .directory_entry_end);
-
-                    return tag;
-                },
-                .symlink => {
-                    self.reader.fillMore() catch |e| switch (e) {
-                        error.EndOfStream => {},
-                        error.ReadFailed => return e,
-                    };
-                    // there must be enough space otherwise EOF will occur
-                    const target = try Token.takeTarget(self.reader);
-                    try Token.expect(self.reader, .directory_entry_end); // shouldn't rebase
-                    return .{ .symlink = target };
-                },
-            }
-        }
-
-        /// Take the current directory entry's contents and discards the file contents.
-        /// Asserts the current directory entry is a file.
-        pub fn takeDiscarding(self: *UnpackIterator, entry: Entry) !u64 {
-            std.debug.assert(entry.kind.isFile());
-
-            const len = try self.reader.takeInt(u64, .little);
-            try self.reader.discardAll64(len);
-
-            if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
-                return error.InvalidPadding;
-
-            try Token.expect(self.reader, .directory_entry_end);
-            return len;
-        }
-
-        pub fn firstDiscarding(self: *UnpackIterator) !struct { bool, u64 } {
-            const kind = try peekType(self.reader);
-            std.debug.assert(kind.isFile());
-
-            Token.expect(self.reader, .magic) catch unreachable;
-            switch (kind) {
-                .file => Token.expect(self.reader, .file) catch unreachable,
-                .executable_file => Token.expect(self.reader, .executable_file) catch unreachable,
-                else => unreachable,
-            }
-
-            const len = try self.reader.takeInt(u64, .little);
-            try self.reader.discardAll64(len);
-
-            if (!std.mem.allEqual(u8, try self.reader.take(Token.padding(len)), 0))
-                return error.InvalidPadding;
-
-            return .{ kind == .executable_file, len };
         }
 
         /// Finish parsing the archive. This does not free the memory: call `.deinit` after.
