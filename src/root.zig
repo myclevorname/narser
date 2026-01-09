@@ -177,7 +177,6 @@ pub const NixArchive = struct {
     pub const UnpackIterator = struct {
         reader: *std.Io.Reader,
         names: Names,
-        in_reader: bool = false,
 
         pub const Names = std.ArrayList(struct {
             name: [std.fs.max_name_bytes]u8,
@@ -214,12 +213,40 @@ pub const NixArchive = struct {
             return kind;
         }
 
-        pub fn takeFile(iter: *UnpackIterator, buffer: []u8) Reader {
-            std.debug.assert(!iter.in_reader);
-            iter.in_reader = true;
+        pub const Reader = struct {
+            iter: *UnpackIterator,
+            reader: std.Io.Reader,
+            remaining: u64,
+            size: u64,
+            finished: bool = false,
+        };
+
+        fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+            const ur: *Reader = @fieldParentPtr("reader", r);
+            if (ur.finished) return error.EndOfStream;
+            const ret = try ur.iter.reader.stream(w, limit.min(.limited64(ur.remaining)));
+            ur.remaining -= ret;
+            if (ur.remaining == 0) {
+                if (!std.mem.allEqual(u8, try ur.iter.reader.take(Token.padding(ur.size)), 0))
+                    return error.ReadFailed;
+                if (ur.iter.names.items.len > 0) Token.expect(ur.iter.reader, .directory_entry_end) catch |e|
+                    switch (e) {
+                        error.InvalidToken, error.ReadFailed => return error.ReadFailed,
+                    };
+                ur.finished = true;
+            }
+            return ret;
+        }
+
+        pub fn takeFile(iter: *UnpackIterator, buffer: []u8) !Reader {
+            const size = try iter.reader.takeInt(u64, .little);
             return .{
-                .iter = &iter,
+                .iter = iter,
+                .remaining = size,
+                .size = size,
                 .reader = .{
+                    .seek = 0,
+                    .end = 0,
                     .buffer = buffer,
                     .vtable = &.{ .stream = stream },
                 },
@@ -229,11 +256,11 @@ pub const NixArchive = struct {
         pub fn takeSymlink(iter: *UnpackIterator, buffer: []u8) ![]u8 {
             const len = try iter.reader.takeInt(u64, .little);
             if (len > buffer.len) return error.Overflow;
-            const ret = try iter.reader.readAll(buffer);
+            try iter.reader.readSliceAll(buffer);
             if (!std.mem.allEqual(u8, try iter.reader.take(Token.padding(len)), 0))
                 return error.InvalidPadding;
             if (iter.names.items.len > 0) try Token.expect(iter.reader, .directory_entry_end);
-            return ret;
+            return buffer[0..len];
         }
 
         pub fn takeDirectory(iter: *UnpackIterator, allocator: std.mem.Allocator) !void {
@@ -243,7 +270,7 @@ pub const NixArchive = struct {
 
         /// Skip a file, returning its size.
         pub fn skipFile(iter: *UnpackIterator) !u64 {
-            const size = try iter.reader.take(u64, .little);
+            const size = try iter.reader.takeInt(u64, .little);
             try iter.reader.discardAll64(size);
 
             if (!std.mem.allEqual(u8, try iter.reader.take(Token.padding(size)), 0))
@@ -267,12 +294,12 @@ pub const NixArchive = struct {
                 .symlink => _ = try iter.skipSymlink(),
                 .directory => {
                     const depth = iter.names.items.len;
-                    try iter.enterDirectory(allocator);
+                    try iter.takeDirectory(allocator);
                     while (iter.names.items.len != depth) if (try iter.next(safety)) |e|
                         switch (e.kind) {
                             .file, .executable_file => _ = try iter.skipFile(),
                             .symlink => _ = try iter.skipSymlink(),
-                            .directory => try iter.enterDirectory(allocator),
+                            .directory => try iter.takeDirectory(allocator),
                         };
                 },
             }
@@ -287,15 +314,15 @@ pub const NixArchive = struct {
                 const last = &iter.names.items[iter.names.items.len - 1];
                 switch (std.mem.order(
                     u8,
-                    iter.names.items[iter.names.items.len - 1].toString(),
+                    last.name[0..last.len],
                     name,
                 )) {
                     .lt => {},
                     .eq => return error.DuplicateObjectName,
                     .gt => return error.WrongDirectoryOrder,
                 }
-                @memcpy(last[0..name.len], name);
-                last.len = name.len;
+                @memcpy(last.name[0..name.len], name);
+                last.len = @intCast(name.len);
                 if (safety == .deny)
                     if (std.mem.indexOfScalar(u8, name, 0) != null or
                         std.mem.indexOfScalar(u8, name, '/') != null or
@@ -327,9 +354,9 @@ pub const NixArchive = struct {
         }
 
         /// Finish parsing the archive. This does not free the memory: call `.deinit` after.
-        pub fn finish(self: *UnpackIterator, allocator: ?std.mem.Allocator) !void {
+        pub fn finish(self: *UnpackIterator, allocator: ?std.mem.Allocator, path_safety: PathSafety) !void {
             while (self.names.items.len != 0) {
-                if (try self.next(allocator.?)) |e| _ = try self.skip(allocator.?, e);
+                if (try self.next(path_safety)) |e| _ = try self.skip(allocator.?, e.kind, path_safety);
             }
 
             try Token.expect(self.reader, .archive_end);
